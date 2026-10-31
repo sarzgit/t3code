@@ -11,11 +11,14 @@ export type BackgroundPalette = Readonly<{
   dominant: string;
   /** The most vivid colour that still covers a visible share, or null for muted images. */
   accent: string | null;
+  /** The darkest and lightest colours covering a visible share; text must stay readable over them. */
+  extremes: ReadonlyArray<string>;
 }>;
 
 // 4 bits per channel: coarse enough to group noise, fine enough to keep distinct hues apart.
 const BUCKET_SHIFT = 4;
 const MIN_ACCENT_SHARE = 0.005;
+const MIN_EXTREME_SHARE = 0.02;
 const MIN_ACCENT_CHROMA = 0.04;
 
 export function pickBackgroundPalette(pixels: ArrayLike<number>): BackgroundPalette | null {
@@ -67,7 +70,14 @@ export function pickBackgroundPalette(pixels: ArrayLike<number>): BackgroundPale
     (best, color) => (!best || accentScore(color) > accentScore(best) ? color : best),
     null,
   );
-  return { dominant: dominant.hex, accent: accent?.hex ?? null };
+  const visible = colors.filter((color) => color.share >= MIN_EXTREME_SHARE);
+  const extremes = visible.length
+    ? [
+        visible.reduce((low, color) => (color.oklch.l < low.oklch.l ? color : low)).hex,
+        visible.reduce((high, color) => (color.oklch.l > high.oklch.l ? color : high)).hex,
+      ]
+    : [];
+  return { dominant: dominant.hex, accent: accent?.hex ?? null, extremes };
 }
 
 function accentScore(color: { readonly share: number; readonly oklch: Oklch }): number {
