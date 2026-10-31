@@ -333,6 +333,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["transparent transparency solid menus dialogs composer"],
   },
   {
+    id: "chat-background-image",
+    title: "Background image",
+    to: "/settings/appearance",
+    searchTerms: ["wallpaper picture photo chat backdrop custom colors"],
+  },
+  {
+    id: "setting-chat-background-blur",
+    title: "Background blur",
+    to: "/settings/appearance",
+    searchTerms: ["wallpaper picture soften blurry"],
+  },
+  {
     id: "diff-color-scheme",
     title: "Diff colors",
     to: "/settings/diffs",

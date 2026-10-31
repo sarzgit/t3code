@@ -461,6 +461,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Contrast"]
       : []),
     ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? ["Glass opacity"] : []),
+    ...(settings.chatBackgroundBlur !== DEFAULT_UNIFIED_SETTINGS.chatBackgroundBlur
+      ? ["Background blur"]
+      : []),
     ...(settings.diffColorScheme !== DEFAULT_UNIFIED_SETTINGS.diffColorScheme
       ? ["Diff colors"]
       : []),
@@ -667,6 +670,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       screenReaderAnnouncements: DEFAULT_UNIFIED_SETTINGS.screenReaderAnnouncements,
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
+      chatBackgroundBlur: DEFAULT_UNIFIED_SETTINGS.chatBackgroundBlur,
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,

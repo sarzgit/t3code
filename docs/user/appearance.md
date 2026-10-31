@@ -21,6 +21,14 @@ Android uses **Material You Layout** by default unless you have turned it off in
 It changes shapes, spacing, and controls independently
 of the selected theme.
 
+## Background image
+
+On web and desktop, choose an image under **Settings → Appearance → Background** to show it behind
+the chat. T3 Code builds a **Background** theme from the image's colours and switches to it; you can
+adjust that theme in the theme editor like any other. **Background blur** softens the image.
+**Remove** deletes the image and returns to the theme you used before, unless you have since picked
+another. Each device or browser keeps its own background.
+
 ## Composer context
 
 Git-backed projects show branch and worktree controls below the composer while you create a thread.
