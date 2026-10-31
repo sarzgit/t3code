@@ -70,14 +70,25 @@ export function pickBackgroundPalette(pixels: ArrayLike<number>): BackgroundPale
     (best, color) => (!best || accentScore(color) > accentScore(best) ? color : best),
     null,
   );
-  const visible = colors.filter((color) => color.share >= MIN_EXTREME_SHARE);
-  const extremes = visible.length
-    ? [
-        visible.reduce((low, color) => (color.oklch.l < low.oklch.l ? color : low)).hex,
-        visible.reduce((high, color) => (color.oklch.l > high.oklch.l ? color : high)).hex,
-      ]
-    : [];
+  // Percentiles, not per-bucket shares, so a textured highlight spread over many buckets counts.
+  const byLightness = colors.toSorted((first, second) => first.oklch.l - second.oklch.l);
+  const extremes = [
+    percentileColor(byLightness, MIN_EXTREME_SHARE),
+    percentileColor(byLightness.toReversed(), MIN_EXTREME_SHARE),
+  ];
   return { dominant: dominant.hex, accent: accent?.hex ?? null, extremes };
+}
+
+function percentileColor(
+  ordered: ReadonlyArray<{ readonly hex: string; readonly share: number }>,
+  share: number,
+): string {
+  let covered = 0;
+  for (const color of ordered) {
+    covered += color.share;
+    if (covered >= share) return color.hex;
+  }
+  return ordered.at(-1)!.hex;
 }
 
 function accentScore(color: { readonly share: number; readonly oklch: Oklch }): number {
