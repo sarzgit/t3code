@@ -2,9 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 import "culori/css";
 import { converter, wcagContrast } from "culori/fn";
 
+import { getThemeColorsForMode } from "../themePalette";
 import {
   CHAT_BACKGROUND_THEME_ID,
   backgroundRemovalRestore,
+  backgroundVeilOpacities,
   buildBackgroundTheme,
 } from "./chatBackground";
 
@@ -28,6 +30,38 @@ describe("buildBackgroundTheme", () => {
   it("carries the image's accent hue into the theme accent", () => {
     const theme = buildBackgroundTheme({ dominant: "#142a5a", accent: "#f08c28" });
     expect(toOklch(theme.colors.accent)!.h).toBeCloseTo(toOklch("#f08c28")!.h!, -1);
+  });
+});
+
+describe("backgroundVeilOpacities", () => {
+  const toRgb = converter("rgb");
+  function composite(canvas: string, image: string, veil: number) {
+    const top = toRgb(canvas)!;
+    const bottom = toRgb(image)!;
+    return {
+      mode: "rgb" as const,
+      r: top.r * veil + bottom.r * (1 - veil),
+      g: top.g * veil + bottom.g * (1 - veil),
+      b: top.b * veil + bottom.b * (1 - veil),
+    };
+  }
+
+  it.each([
+    ["a black image in light mode", "#000000", "light"],
+    ["a white image in dark mode", "#ffffff", "dark"],
+    ["a saturated image in dark mode", "#f08c28", "dark"],
+  ] as const)("keeps body and muted text readable over %s", (_name, dominant, mode) => {
+    const palette = { dominant, accent: null };
+    const veil = backgroundVeilOpacities(palette)[mode];
+    const colors = getThemeColorsForMode(buildBackgroundTheme(palette), mode)!;
+    const mixed = composite(colors.canvas, dominant, veil);
+    expect(wcagContrast(colors.text, mixed)).toBeGreaterThanOrEqual(4.5);
+    expect(wcagContrast(colors.textMuted, mixed)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("lets more of the image through when it already suits the mode", () => {
+    const veils = backgroundVeilOpacities({ dominant: "#0b0d12", accent: null });
+    expect(veils.dark).toBeLessThan(veils.light);
   });
 });
 
@@ -69,6 +103,27 @@ describe("backgroundRemovalRestore", () => {
     expect(
       backgroundRemovalRestore({ currentTheme: "grove", currentHalves: {}, ...previous }),
     ).toBeNull();
+  });
+
+  it("keeps light and dark themes picked after the background was set", () => {
+    expect(
+      backgroundRemovalRestore({
+        currentTheme: CHAT_BACKGROUND_THEME_ID,
+        currentHalves: { light: "ember", dark: "grove" },
+        ...previous,
+      }),
+    ).toBeNull();
+  });
+
+  it("restores only the mode still showing the background", () => {
+    expect(
+      backgroundRemovalRestore({
+        currentTheme: CHAT_BACKGROUND_THEME_ID,
+        currentHalves: { light: "ember" },
+        previousTheme: "system",
+        previousThemeHalves: '{"light":"iris","dark":"grove"}',
+      }),
+    ).toEqual({ theme: "system", halves: '{"light":"ember","dark":"grove"}' });
   });
 
   it("falls back to the system theme without a usable earlier theme", () => {
