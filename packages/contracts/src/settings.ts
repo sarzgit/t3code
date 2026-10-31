@@ -145,6 +145,14 @@ export const GlassOpacity = Schema.Int.check(
 export type GlassOpacity = typeof GlassOpacity.Type;
 const DEFAULT_GLASS_OPACITY: GlassOpacity = 80;
 
+export const MIN_CHAT_BACKGROUND_BLUR = 0;
+export const MAX_CHAT_BACKGROUND_BLUR = 40;
+export const ChatBackgroundBlur = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_CHAT_BACKGROUND_BLUR, maximum: MAX_CHAT_BACKGROUND_BLUR }),
+);
+export type ChatBackgroundBlur = typeof ChatBackgroundBlur.Type;
+const DEFAULT_CHAT_BACKGROUND_BLUR: ChatBackgroundBlur = 12;
+
 export const MIN_APPEARANCE_CONTRAST = 50;
 export const MAX_APPEARANCE_CONTRAST = 200;
 export const AppearanceContrast = Schema.Int.check(
@@ -473,6 +481,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   glassOpacity: GlassOpacity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_GLASS_OPACITY)),
+  ),
+  chatBackgroundBlur: ChatBackgroundBlur.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_BACKGROUND_BLUR)),
   ),
   fontSizeInterface: InterfaceFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_FONT_SIZE)),
@@ -2023,6 +2034,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   glassOpacity: Schema.optionalKey(GlassOpacity),
+  chatBackgroundBlur: Schema.optionalKey(ChatBackgroundBlur),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),

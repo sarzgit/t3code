@@ -368,6 +368,7 @@ import { branchMismatchBannerItem, extensionStatusBannerItem } from "./chat/Thre
 import { ThreadNow } from "./chat/ThreadNow";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import { useDelayedStatus } from "../hooks/useDelayedStatus";
+import { ChatBackgroundLayer } from "../chatBackground/ChatBackgroundLayer";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
 import {
   type EnvironmentUnavailableState,
@@ -3394,8 +3395,9 @@ export default function ChatView(props: ChatViewProps) {
             />
             <div
               {...conversationArea}
-              className="relative flex min-h-0 flex-1 flex-col bg-background"
+              className="relative isolate flex min-h-0 flex-1 flex-col bg-background"
             >
+              <ChatBackgroundLayer />
               <WorkspaceMutationIdContext value={workspaceMutationId}>
                 <ThreadTimeline
                   pendingApprovals={pendingApprovals}

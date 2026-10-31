@@ -49,6 +49,7 @@ const clientSettings: ClientSettings = {
   fontSizeTerminal: 12,
   fontSmoothing: true,
   glassOpacity: 80,
+  chatBackgroundBlur: 12,
   onboardingCompletedAt: null,
   panelAnimationDurationMs: 0,
   proactivePanelsEnabled: true,

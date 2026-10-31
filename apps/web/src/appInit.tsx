@@ -97,6 +97,9 @@ function startClientAppearance(): void {
         root.style.removeProperty("--glass-blur");
       }
     }
+    if (previous?.chatBackgroundBlur !== settings.chatBackgroundBlur) {
+      root.style.setProperty("--chat-background-blur", `${settings.chatBackgroundBlur}px`);
+    }
     if (
       previous?.fontFamilySans !== settings.fontFamilySans ||
       previous.fontFamilyCode !== settings.fontFamilyCode ||
