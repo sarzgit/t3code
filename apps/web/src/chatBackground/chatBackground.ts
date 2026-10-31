@@ -174,12 +174,14 @@ export async function setChatBackground(file: File): Promise<void> {
       };
 
   const theme = buildBackgroundTheme(palette);
-  if (current) updateCustomTheme(theme);
+  const replaced = getCustomThemes().find((candidate) => candidate.id === theme.id);
+  if (replaced) updateCustomTheme(theme);
   else installCustomTheme(theme);
   try {
     await writeChatBackground(record);
   } catch (error) {
-    if (!current) removeCustomTheme(theme.id);
+    if (replaced) updateCustomTheme(replaced);
+    else removeCustomTheme(theme.id);
     throw new Error("The image couldn't be saved.", { cause: error });
   }
   publish(record);
@@ -200,16 +202,35 @@ export async function removeChatBackground(): Promise<void> {
     previousThemeHalves: record?.previousThemeHalves ?? null,
   });
   if (restore) {
-    if (!setTheme(restore.theme)) throw new Error("Your earlier theme couldn't be restored.");
-    if (restore.halves !== null) {
-      window.localStorage.setItem(THEME_HALVES_STORAGE_KEY, restore.halves);
-      refreshTheme();
+    const before = {
+      theme: readThemePreference(),
+      halves: serializeThemeHalves(readThemeHalvesRaw()),
+    };
+    if (!applyThemeSelection(restore)) {
+      // setTheme clears the mix first, so put the whole selection back.
+      applyThemeSelection(before);
+      throw new Error("Your earlier theme couldn't be restored.");
     }
   }
   if (findBackgroundTheme()?.owned) removeCustomTheme(CHAT_BACKGROUND_THEME_ID);
   await deleteChatBackground();
   publish(null);
   channel?.postMessage("changed");
+}
+
+function applyThemeSelection(selection: {
+  readonly theme: string;
+  readonly halves: string | null;
+}): boolean {
+  if (!setTheme(selection.theme)) return false;
+  if (selection.halves === null) return true;
+  try {
+    window.localStorage.setItem(THEME_HALVES_STORAGE_KEY, selection.halves);
+  } catch {
+    return false;
+  }
+  refreshTheme();
+  return true;
 }
 
 type ThemeHalves = { light?: string; dark?: string };
@@ -248,17 +269,30 @@ export function backgroundRemovalRestore(input: {
   );
   if (!usesBackground) return null;
 
-  const theme =
-    input.previousTheme === null || input.previousTheme === CHAT_BACKGROUND_THEME_ID
-      ? "system"
-      : input.previousTheme;
-  const halves: ThemeHalves = {};
   const previousHalves = parseThemeHalves(input.previousThemeHalves);
+  const previousFor = (mode: ThemeAppearance) => {
+    const previous = previousHalves[mode] ?? input.previousTheme;
+    return previous === null || previous === CHAT_BACKGROUND_THEME_ID ? "system" : previous;
+  };
+  const wanted = Object.fromEntries(
+    THEME_MODES.map((mode) => {
+      const current = input.currentHalves[mode] ?? input.currentTheme;
+      return [mode, current === CHAT_BACKGROUND_THEME_ID ? previousFor(mode) : current];
+    }),
+  ) as Record<ThemeAppearance, string>;
+
+  if (wanted.light === wanted.dark) return { theme: wanted.light, halves: null };
+  // A mix is a standard base with a theme per mode; standard picks need no half.
+  const standardBase = [input.previousTheme, input.currentTheme].find(isStandardTheme) ?? "system";
+  const halves: ThemeHalves = {};
   for (const mode of THEME_MODES) {
-    const kept = input.currentHalves[mode] ?? previousHalves[mode];
-    if (kept !== undefined && kept !== CHAT_BACKGROUND_THEME_ID) halves[mode] = kept;
+    if (!isStandardTheme(wanted[mode])) halves[mode] = wanted[mode];
   }
-  return { theme, halves: serializeThemeHalves(halves) };
+  return { theme: standardBase, halves: serializeThemeHalves(halves) };
+}
+
+function isStandardTheme(theme: string | null): theme is string {
+  return theme === "system" || theme === "light" || theme === "dark";
 }
 
 const toRgb = converter("rgb");
@@ -286,12 +320,16 @@ function veilFor(colors: ThemeColors, samples: ReadonlyArray<string>): number {
   return MAX_VEIL;
 }
 
-/** The lightest tint over the image that keeps body and muted text readable on its main colours. */
+/** The lightest tint over the image that keeps body and muted text readable on its visible colours. */
 export function backgroundVeilOpacities(
   palette: BackgroundPalette,
 ): Readonly<Record<ThemeAppearance, number>> {
   const theme = buildBackgroundTheme(palette);
-  const samples = [palette.dominant, ...(palette.accent ? [palette.accent] : [])];
+  const samples = [
+    palette.dominant,
+    ...(palette.accent ? [palette.accent] : []),
+    ...palette.extremes,
+  ];
   const veil = (mode: ThemeAppearance) => {
     const colors = getThemeColorsForMode(theme, mode);
     return colors ? veilFor(colors, samples) : MAX_VEIL;
