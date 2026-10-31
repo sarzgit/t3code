@@ -47,7 +47,11 @@ async function withStore<A>(
 
 export async function readChatBackground(): Promise<ChatBackgroundRecord | null> {
   const record = await withStore("readonly", (store) => store.get(RECORD_KEY));
-  return isChatBackgroundRecord(record) ? record : null;
+  if (!isChatBackgroundRecord(record)) return null;
+  // Records saved before extremes were sampled still load; the tint then uses the main colours.
+  return Array.isArray(record.palette.extremes)
+    ? record
+    : { ...record, palette: { ...record.palette, extremes: [] } };
 }
 
 export async function writeChatBackground(record: ChatBackgroundRecord): Promise<void> {

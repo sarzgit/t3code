@@ -60,17 +60,30 @@ describe("backgroundVeilOpacities", () => {
     expect(wcagContrast(colors.textMuted, mixed)).toBeGreaterThanOrEqual(3);
   });
 
-  it("keeps text readable over the lightest part of a mostly dark image", () => {
+  // A textured highlight spreads over 64 buckets, each far below any per-bucket share cutoff.
+  const paleShades = [192, 208, 224, 240].flatMap((r) =>
+    [192, 208, 224, 240].flatMap((g) => [192, 208, 224, 240].map((b) => [r, g, b, 255])),
+  );
+  it.each([
+    ["a flat white highlight", Array(400).fill([255, 255, 255, 255]), "#ffffff"],
+    [
+      "a textured pale highlight",
+      Array(400)
+        .fill(0)
+        .map((_, i) => paleShades[i % 64]!),
+      "#f0f0f0",
+    ],
+  ])("keeps text readable over %s on a mostly dark image", (_name, highlight, brightest) => {
     const pixels = Uint8ClampedArray.from([
-      ...Array(60).fill([0, 0, 0, 255]).flat(),
-      ...Array(40).fill([255, 255, 255, 255]).flat(),
+      ...Array(600).fill([0, 0, 0, 255]).flat(),
+      ...highlight.flat(),
     ]);
     const palette = pickBackgroundPalette(pixels)!;
     const veil = backgroundVeilOpacities(palette).dark;
     const colors = getThemeColorsForMode(buildBackgroundTheme(palette), "dark")!;
-    const overWhite = composite(colors.canvas, "#ffffff", veil);
-    expect(wcagContrast(colors.text, overWhite)).toBeGreaterThanOrEqual(4.5);
-    expect(wcagContrast(colors.textMuted, overWhite)).toBeGreaterThanOrEqual(3);
+    const overHighlight = composite(colors.canvas, brightest, veil);
+    expect(wcagContrast(colors.text, overHighlight)).toBeGreaterThanOrEqual(4.5);
+    expect(wcagContrast(colors.textMuted, overHighlight)).toBeGreaterThanOrEqual(3);
   });
 
   it("lets more of the image through when it already suits the mode", () => {
