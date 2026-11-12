@@ -62,13 +62,16 @@ function sample(Music) {
 function run(argv) {
   const Music = Application("Music");
   const interval = Number(argv[0]);
+  let failures = 0;
   while (true) {
     try {
       emit(sample(Music));
+      failures = 0;
     } catch (error) {
-      // A denial ends the watcher so the server can report it. Anything else, such as Music
-      // quitting mid-sample or answering slowly, skips one sample.
-      if (error.errorNumber === -1743) throw error;
+      // A denial or a Music that stays stuck ends the watcher so the server can report it.
+      // A single failure, such as Music quitting mid-sample, only skips that sample.
+      failures += 1;
+      if (error.errorNumber === -1743 || failures >= 3) throw error;
     }
     delay(interval);
   }
