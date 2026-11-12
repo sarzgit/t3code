@@ -4,6 +4,7 @@ import {
   type ReceivedMusicState,
 } from "@t3tools/client-runtime/state/music";
 import type { ClientSettings, EnvironmentId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -19,7 +20,10 @@ const receivedMusicStateAtom = Atom.family((environmentId: EnvironmentId) =>
       get(musicEnvironment.state({ environmentId, input: {} })),
       () => null,
     );
-    return state === null ? null : { state, receivedAtMs: Date.now() };
+    if (state === null) return null;
+    // A recompute without a new state keeps its stamp, or progress would jump backward.
+    const previous = Option.getOrNull(get.self<ReceivedMusicState | null>());
+    return previous?.state === state ? previous : { state, receivedAtMs: Date.now() };
   }).pipe(Atom.withLabel(`music-received-state:${environmentId}`)),
 );
 

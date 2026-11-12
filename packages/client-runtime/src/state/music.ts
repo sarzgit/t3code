@@ -24,9 +24,12 @@ export function createMusicEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
     }),
+    // A miss (no artwork yet, a slow first reply, a track change mid-request) retries while shown.
     artwork: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:music:artwork",
       tag: WS_METHODS.musicGetArtwork,
+      refreshIntervalMs: 15_000,
+      isFinal: (artwork) => artwork.dataUrl !== null,
     }),
     playPlaylist: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:music:play-playlist",

@@ -63,7 +63,13 @@ function run(argv) {
   const Music = Application("Music");
   const interval = Number(argv[0]);
   while (true) {
-    emit(sample(Music));
+    try {
+      emit(sample(Music));
+    } catch (error) {
+      // A denial ends the watcher so the server can report it. Anything else, such as Music
+      // quitting mid-sample or answering slowly, skips one sample.
+      if (error.errorNumber === -1743) throw error;
+    }
     delay(interval);
   }
 }`;
@@ -347,7 +353,7 @@ const make = Effect.gen(function* () {
             Stream.fromSubscription(subscription),
           );
         }),
-      ).pipe(Stream.scoped)
+      )
     : Stream.concat(Stream.make(UNSUPPORTED), Stream.never);
 
   const runScript = Effect.fn("MusicPlayer.runScript")(function* (

@@ -69,7 +69,16 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
     readonly playback: MusicPlayback;
   } | null>(null);
 
-  if (received === null || received.state._tag === "unsupported") return null;
+  if (received === null) {
+    // Music can take ten seconds or more to answer its first Apple event.
+    return (
+      <div className="flex h-14 items-center gap-2 rounded-lg border border-sidebar-border px-3 text-sm text-sidebar-muted-foreground">
+        <MusicIcon className="size-4" />
+        Music
+      </div>
+    );
+  }
+  if (received.state._tag === "unsupported") return null;
   const { state } = received;
   const ready = state._tag === "ready" ? state : null;
   const playback =
@@ -79,14 +88,19 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
   const controllable = canControl && state._tag !== "permission-denied";
 
   const control = (input: MusicControlInput) => {
-    if (input._tag === "play-pause") {
-      setPending({
-        forReceivedAt: received.receivedAtMs,
-        playback: playback === "playing" ? "paused" : "playing",
-      });
-    }
+    const optimistic =
+      input._tag === "play-pause"
+        ? {
+            forReceivedAt: received.receivedAtMs,
+            playback: playback === "playing" ? ("paused" as const) : ("playing" as const),
+          }
+        : null;
+    if (optimistic !== null) setPending(optimistic);
     void runControl({ environmentId, input }).then((result) => {
-      if (result._tag !== "Success") setPending(null);
+      const clear = () => setPending((current) => (current === optimistic ? null : current));
+      if (result._tag !== "Success") clear();
+      // The watcher reports a real change within a second; after that, show Music's own state.
+      else if (optimistic !== null) setTimeout(clear, 2_500);
     });
   };
 
