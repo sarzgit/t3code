@@ -411,6 +411,15 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
+import {
+  MusicArtwork,
+  MusicArtworkInput,
+  MusicControlInput,
+  MusicError,
+  MusicPlayerState,
+  MusicPlaylists,
+  MusicPlayPlaylistInput,
+} from "./music.ts";
 
 export const WS_METHODS = {
   projectsListEntries: "projects.listEntries",
@@ -620,6 +629,11 @@ export const WS_METHODS = {
   subscribePreviewEvents: "subscribePreviewEvents",
   subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
   subscribeDeviceState: "subscribeDeviceState",
+  subscribeMusicState: "subscribeMusicState",
+  musicListPlaylists: "music.listPlaylists",
+  musicPlayPlaylist: "music.playPlaylist",
+  musicControl: "music.control",
+  musicGetArtwork: "music.getArtwork",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
@@ -1769,6 +1783,35 @@ const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
   stream: true,
 });
 
+const WsSubscribeMusicStateRpc = Rpc.make(WS_METHODS.subscribeMusicState, {
+  payload: Schema.Struct({}),
+  success: MusicPlayerState,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsMusicListPlaylistsRpc = Rpc.make(WS_METHODS.musicListPlaylists, {
+  payload: Schema.Struct({}),
+  success: MusicPlaylists,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicPlayPlaylistRpc = Rpc.make(WS_METHODS.musicPlayPlaylist, {
+  payload: MusicPlayPlaylistInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicControlRpc = Rpc.make(WS_METHODS.musicControl, {
+  payload: MusicControlInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicGetArtworkRpc = Rpc.make(WS_METHODS.musicGetArtwork, {
+  payload: MusicArtworkInput,
+  success: MusicArtwork,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
@@ -2256,6 +2299,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsDeviceDetailRpc,
   WsDeviceActionRpc,
   WsSubscribeDeviceStateRpc,
+  WsSubscribeMusicStateRpc,
+  WsMusicListPlaylistsRpc,
+  WsMusicPlayPlaylistRpc,
+  WsMusicControlRpc,
+  WsMusicGetArtworkRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

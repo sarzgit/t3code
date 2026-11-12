@@ -188,6 +188,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { terminalOutputStream, withOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
+import * as MusicPlayer from "./music/MusicPlayer.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
@@ -1449,6 +1450,7 @@ export const layerWsRpc = (
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
+      const musicPlayer = yield* MusicPlayer.MusicPlayer;
       const deviceHostContext =
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
@@ -3175,6 +3177,11 @@ export const layerWsRpc = (
         [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),
         [WS_METHODS.subscribeDeviceState]: (_input) => DeviceService.stateStream(deviceService),
+        [WS_METHODS.subscribeMusicState]: (_input) => musicPlayer.stateStream,
+        [WS_METHODS.musicListPlaylists]: (_input) => musicPlayer.listPlaylists,
+        [WS_METHODS.musicPlayPlaylist]: (input) => musicPlayer.playPlaylist(input),
+        [WS_METHODS.musicControl]: (input) => musicPlayer.control(input),
+        [WS_METHODS.musicGetArtwork]: (input) => musicPlayer.artwork(input),
         [WS_METHODS.previewStopLocalServer]: (input) => portDiscovery.stopServer(input),
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
           Stream.callback<DiscoveredLocalServerList>((queue) =>

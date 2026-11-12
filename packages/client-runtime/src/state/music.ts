@@ -1,0 +1,68 @@
+import { type MusicPlayerState, WS_METHODS } from "@t3tools/contracts";
+import type { Atom } from "effect/reactivity";
+
+import type { EnvironmentRegistry } from "../connection/registry.ts";
+import {
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
+} from "./runtime.ts";
+
+export function createMusicEnvironmentAtoms<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+) {
+  return {
+    // The server keeps a Music watcher running while anyone subscribes, so let go at once.
+    state: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:music:state",
+      tag: WS_METHODS.subscribeMusicState,
+      idleTtlMs: 0,
+    }),
+    playlists: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:playlists",
+      tag: WS_METHODS.musicListPlaylists,
+      staleTimeMs: 30_000,
+      idleTtlMs: 60_000,
+    }),
+    artwork: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:artwork",
+      tag: WS_METHODS.musicGetArtwork,
+    }),
+    playPlaylist: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:play-playlist",
+      tag: WS_METHODS.musicPlayPlaylist,
+    }),
+    control: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:control",
+      tag: WS_METHODS.musicControl,
+    }),
+  };
+}
+
+/** A player state stamped with when this client received it. */
+export interface ReceivedMusicState {
+  readonly state: MusicPlayerState;
+  readonly receivedAtMs: number;
+}
+
+/**
+ * Seconds into the current track at `nowMs`. Measured from when this client received the
+ * state, never the server's clock, so a remote server with a skewed clock still shows the
+ * right position.
+ */
+export function musicPositionAt(received: ReceivedMusicState, nowMs: number): number {
+  const { state } = received;
+  if (state._tag !== "ready" || state.track === null) return 0;
+  const elapsed =
+    state.playback === "playing" ? Math.max(0, nowMs - received.receivedAtMs) / 1000 : 0;
+  const position = state.positionSec + elapsed;
+  return state.track.durationSec > 0 ? Math.min(position, state.track.durationSec) : position;
+}
+
+export function formatMusicDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `${hours} hr ${minutes} min`;
+  return `${minutes} min`;
+}
