@@ -377,6 +377,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["latex tex katex equations formulas markdown"],
   },
   {
+    id: "music-player",
+    title: "Music player",
+    to: "/settings/appearance",
+    searchTerms: ["apple music playlists songs now playing sidebar"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",

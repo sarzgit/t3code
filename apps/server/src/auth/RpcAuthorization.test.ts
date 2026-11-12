@@ -74,6 +74,19 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("lets thread readers see what Music plays, but only operators make the host play audio", () => {
+    for (const method of [
+      WS_METHODS.subscribeMusicState,
+      WS_METHODS.musicListPlaylists,
+      WS_METHODS.musicGetArtwork,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [WS_METHODS.musicPlayPlaylist, WS_METHODS.musicControl]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+  });
+
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
       expect(() => requiredScopeForRpcMethod(method)).toThrow(

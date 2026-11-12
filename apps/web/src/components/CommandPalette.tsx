@@ -75,7 +75,10 @@ import {
   MonitorIcon,
   PinIcon,
   PinOffIcon,
+  PlayIcon,
   PlugIcon,
+  SkipBackIcon,
+  SkipForwardIcon,
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
@@ -116,6 +119,7 @@ import { readLocalApi } from "../localApi";
 import { configuredHostedAppUrl } from "../hostedPairing";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
+import { musicEnvironment, musicEnvironmentIdFor, useMusicPlayerEnabled } from "../state/music";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
@@ -457,6 +461,8 @@ function OpenCommandPaletteDialog(props: {
   });
   const { scratchEnvironmentId, scratchWorkspaceRootFor, startScratchThread } = useScratchProject();
   const startTriage = useStartTriage();
+  const musicPlayerEnabled = useMusicPlayerEnabled();
+  const runMusicControl = useAtomCommand(musicEnvironment.control);
   const lookupRepository = useAtomQueryRunner(sourceControlEnvironment.repository, {
     reportFailure: false,
   });
@@ -698,6 +704,11 @@ function OpenCommandPaletteDialog(props: {
     activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
   const scratchTargetEnvironmentId = scratchEnvironmentId(currentProjectEnvironmentId);
+  const musicEnvironmentId = musicEnvironmentIdFor(
+    musicPlayerEnabled,
+    environments.find((environment) => environment.environmentId === primaryEnvironmentId),
+  );
+  const canControlMusic = useAtomValue(musicEnvironment.control.permissionAtom(musicEnvironmentId));
   const supportsTriage = (environmentId: EnvironmentId | null) =>
     environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
       ?.environment.capabilities.triage === true;
@@ -1342,6 +1353,26 @@ function OpenCommandPaletteDialog(props: {
       icon: <BugIcon className={ITEM_ICON_CLASS} />,
       run: () => startTriage(triageEnvironmentId),
     });
+  }
+
+  if (musicEnvironmentId !== null && canControlMusic) {
+    const musicActions = [
+      { tag: "play-pause", title: "Music: Play/Pause", icon: PlayIcon, terms: ["pause", "resume"] },
+      { tag: "next", title: "Music: Next track", icon: SkipForwardIcon, terms: ["skip"] },
+      { tag: "previous", title: "Music: Previous track", icon: SkipBackIcon, terms: ["back"] },
+    ] as const;
+    for (const action of musicActions) {
+      actionItems.push({
+        kind: "action",
+        value: `action:music-${action.tag}`,
+        searchTerms: ["music", "song", "track", "apple music", ...action.terms],
+        title: action.title,
+        icon: <action.icon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          await runMusicControl({ environmentId: musicEnvironmentId, input: { _tag: action.tag } });
+        },
+      });
+    }
   }
 
   if (activeThreadKey !== null && supportsThreadFind) {

@@ -351,6 +351,31 @@ export function AppearanceSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          {...searchableSetting("music-player")}
+          description="Show what the Music app on this environment's Mac is playing at the bottom of the sidebar."
+          resetAction={
+            settings.musicPlayerEnabled !== DEFAULT_UNIFIED_SETTINGS.musicPlayerEnabled ? (
+              <SettingResetButton
+                label="music player"
+                onClick={() =>
+                  updateSettings({
+                    musicPlayerEnabled: DEFAULT_UNIFIED_SETTINGS.musicPlayerEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.musicPlayerEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ musicPlayerEnabled: Boolean(checked) })
+              }
+              aria-label="Show music player"
+            />
+          }
+        />
         <AdvancedSettings
           targetIds={[
             searchableSetting("panel-animations").id,

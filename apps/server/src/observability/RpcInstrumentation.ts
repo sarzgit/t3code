@@ -226,6 +226,11 @@ const RPC_AGGREGATES = {
   [WS_METHODS.deviceDetail]: "device",
   [WS_METHODS.deviceAction]: "device",
   [WS_METHODS.subscribeDeviceState]: "device",
+  [WS_METHODS.subscribeMusicState]: "music",
+  [WS_METHODS.musicListPlaylists]: "music",
+  [WS_METHODS.musicPlayPlaylist]: "music",
+  [WS_METHODS.musicControl]: "music",
+  [WS_METHODS.musicGetArtwork]: "music",
   [WS_METHODS.subscribeServerConfig]: "server",
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",
@@ -241,6 +246,8 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
   WS_METHODS.serverGetProcessDiagnostics,
   WS_METHODS.serverGetProcessResourceHistory,
   WS_METHODS.serverSignalProcess,
+  WS_METHODS.subscribeMusicState,
+  WS_METHODS.musicGetArtwork,
 ]);
 
 /** Add after RpcScopeAuthorization to wrap authorization and record rejected calls. */
