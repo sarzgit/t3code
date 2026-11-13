@@ -386,6 +386,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["apple music playlists songs now playing sidebar"],
   },
   {
+    id: "music-agent-cue",
+    title: "When an agent needs you",
+    to: "/settings/appearance",
+    searchTerms: ["music volume duck pause approval question agent"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",

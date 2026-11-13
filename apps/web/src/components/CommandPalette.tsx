@@ -120,6 +120,7 @@ import { configuredHostedAppUrl } from "../hostedPairing";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
 import { musicEnvironment, musicEnvironmentIdFor, useMusicPlayerEnabled } from "../state/music";
+import { useMusicShortcuts } from "../shortcuts/useMusicShortcuts";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
@@ -312,6 +313,7 @@ const NEW_THREAD_NO_PROJECT_VALUE = "new-thread-in:no-project";
 
 export function CommandPalette({ children }: { children: ReactNode }) {
   useCommandPaletteMount();
+  useMusicShortcuts();
   const state = useCommandPaletteStore();
   const setOpen = (open: boolean) => dispatchCommandPalette({ _tag: "SetOpen", open });
   const openChildSearch = (mode: "files" | "content", context: CommandPaletteReturnContext) =>
@@ -1361,9 +1363,27 @@ function OpenCommandPaletteDialog(props: {
 
   if (musicEnvironmentId !== null && canControlMusic) {
     const musicActions = [
-      { tag: "play-pause", title: "Music: Play/Pause", icon: PlayIcon, terms: ["pause", "resume"] },
-      { tag: "next", title: "Music: Next track", icon: SkipForwardIcon, terms: ["skip"] },
-      { tag: "previous", title: "Music: Previous track", icon: SkipBackIcon, terms: ["back"] },
+      {
+        tag: "play-pause",
+        title: "Music: Play/Pause",
+        icon: PlayIcon,
+        terms: ["pause", "resume"],
+        shortcutCommand: "music.playPause",
+      },
+      {
+        tag: "next",
+        title: "Music: Next track",
+        icon: SkipForwardIcon,
+        terms: ["skip"],
+        shortcutCommand: "music.next",
+      },
+      {
+        tag: "previous",
+        title: "Music: Previous track",
+        icon: SkipBackIcon,
+        terms: ["back"],
+        shortcutCommand: "music.previous",
+      },
     ] as const;
     for (const action of musicActions) {
       actionItems.push({
@@ -1372,6 +1392,7 @@ function OpenCommandPaletteDialog(props: {
         searchTerms: ["music", "song", "track", "apple music", ...action.terms],
         title: action.title,
         icon: <action.icon className={ITEM_ICON_CLASS} />,
+        shortcutCommand: action.shortcutCommand,
         run: async () => {
           await runMusicControl({ environmentId: musicEnvironmentId, input: { _tag: action.tag } });
         },

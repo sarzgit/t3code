@@ -50,6 +50,13 @@ export function createMusicEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
     }),
+    // Opening the Stats tab re-reads; the server buffers a minute of listening before writing.
+    stats: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:stats",
+      tag: WS_METHODS.musicGetStats,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
     playPlaylist: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:music:play-playlist",
       tag: WS_METHODS.musicPlayPlaylist,

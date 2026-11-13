@@ -20,6 +20,7 @@ import {
   AudioLinesIcon,
   ChevronLeftIcon,
   EyeOffIcon,
+  HeartIcon,
   MusicIcon,
   PinIcon,
   PinOffIcon,
@@ -39,6 +40,8 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
 import { Spinner } from "../ui/spinner";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { ListeningStats } from "./MusicListeningStats";
 
 export function MusicArtwork({
   environmentId,
@@ -67,7 +70,8 @@ export function MusicArtwork({
 
 type PanelView =
   | { readonly kind: "playlists"; readonly returnFocusTo: string | null }
-  | { readonly kind: "songs"; readonly playlist: MusicPlaylist };
+  | { readonly kind: "songs"; readonly playlist: MusicPlaylist }
+  | { readonly kind: "stats" };
 
 /** Popover content: what is playing, then playlists or one playlist's songs. */
 export function MusicPanel({
@@ -102,9 +106,34 @@ export function MusicPanel({
               {[track.artist, track.album].filter(Boolean).join(" · ")}
             </p>
           </div>
+          {track.favorited !== undefined ? (
+            <FavoriteButton
+              environmentId={environmentId}
+              track={track}
+              favorited={track.favorited}
+              disabled={!controllable}
+            />
+          ) : null}
         </div>
       ) : null}
-      {view.kind === "songs" ? (
+      {view.kind !== "songs" ? (
+        <ToggleGroup
+          aria-label="Music view"
+          className="w-full *:flex-1"
+          variant="segmented"
+          value={[view.kind]}
+          onValueChange={(next) => {
+            if (next[0] === "stats") setView({ kind: "stats" });
+            else if (next[0] === "playlists") setView({ kind: "playlists", returnFocusTo: null });
+          }}
+        >
+          <Toggle value="playlists">Playlists</Toggle>
+          <Toggle value="stats">Stats</Toggle>
+        </ToggleGroup>
+      ) : null}
+      {view.kind === "stats" ? (
+        <ListeningStats environmentId={environmentId} />
+      ) : view.kind === "songs" ? (
         <PlaylistSongs
           environmentId={environmentId}
           playlist={view.playlist}
@@ -123,6 +152,49 @@ export function MusicPanel({
         />
       )}
     </div>
+  );
+}
+
+/** Shows the click at once; Music's own value takes over once the watcher reports it. */
+function FavoriteButton({
+  environmentId,
+  track,
+  favorited,
+  disabled,
+}: {
+  environmentId: EnvironmentId;
+  track: MusicTrack;
+  favorited: boolean;
+  disabled: boolean;
+}) {
+  const runControl = useAtomCommand(musicEnvironment.control);
+  const [sent, setSent] = useState<{ readonly trackId: string; readonly value: boolean } | null>(
+    null,
+  );
+  const shown = sent !== null && sent.trackId === track.id ? sent.value : favorited;
+  return (
+    <Button
+      variant="ghost-muted"
+      size="icon-sm"
+      aria-label="Favorite"
+      aria-pressed={shown}
+      data-pressed={shown ? "" : undefined}
+      disabled={disabled}
+      onClick={() => {
+        const next = { trackId: track.id, value: !shown };
+        setSent(next);
+        const clear = () => setSent((current) => (current === next ? null : current));
+        void runControl({
+          environmentId,
+          input: { _tag: "set-favorited", trackId: track.id, favorited: next.value },
+        }).then((result) => {
+          if (result._tag !== "Success") clear();
+          else setTimeout(clear, 3_000);
+        });
+      }}
+    >
+      <HeartIcon className={cn(shown && "fill-current")} />
+    </Button>
   );
 }
 

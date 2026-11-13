@@ -1,6 +1,7 @@
 import {
   MusicError,
   type MusicArtwork,
+  type MusicAgentCue,
   type MusicArtworkInput,
   type MusicControlInput,
   type MusicListTracksInput,
@@ -9,6 +10,8 @@ import {
   type MusicPlaylistTracks,
   type MusicPlayPlaylistInput,
   type MusicPlayTrackInput,
+  type MusicStats,
+  type MusicStatsInput,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cache from "effect/Cache";
@@ -30,6 +33,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { localDayKey, MusicListeningStats } from "./MusicListeningStats.ts";
 
 export class MusicPlayer extends Context.Service<
   MusicPlayer,
@@ -43,8 +47,57 @@ export class MusicPlayer extends Context.Service<
     readonly playTrack: (input: MusicPlayTrackInput) => Effect.Effect<void, MusicError>;
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
+    readonly stats: (input: MusicStatsInput) => Effect.Effect<MusicStats, MusicError>;
+    /** Agent requests drive the cue; working projects attribute listening time. */
+    readonly observeAgents: (activity: AgentActivity, cue: MusicAgentCue) => Effect.Effect<void>;
   }
 >()("t3/music/MusicPlayer") {}
+
+export interface AgentActivity {
+  /** Open approval and question requests across unarchived threads. */
+  readonly requestIds: ReadonlySet<string>;
+  readonly workingProjectIds: ReadonlySet<string>;
+  /** The first report after startup: its requests predate this run and never trigger the cue. */
+  readonly initial: boolean;
+}
+
+type CueApplied =
+  | { readonly kind: "lower-volume"; readonly from: number; readonly to: number }
+  | { readonly kind: "pause" };
+
+interface CueState {
+  readonly known: ReadonlySet<string>;
+  /** Requests that arrived since the cue last cleared; answering all of them restores. */
+  readonly triggers: ReadonlySet<string>;
+  readonly applied: CueApplied | null;
+}
+
+const INITIAL_CUE_STATE: CueState = { known: new Set(), triggers: new Set(), applied: null };
+
+function planCue(
+  state: CueState,
+  requestIds: ReadonlySet<string>,
+  initial: boolean,
+): { readonly next: CueState; readonly step: "apply" | "restore" | null } {
+  const fresh = initial ? [] : [...requestIds].filter((id) => !state.known.has(id));
+  const triggers = new Set([...state.triggers].filter((id) => requestIds.has(id)));
+  for (const id of fresh) triggers.add(id);
+  const step =
+    fresh.length > 0 && state.applied === null
+      ? "apply"
+      : triggers.size === 0 && state.applied !== null
+        ? "restore"
+        : null;
+  return { next: { known: new Set(requestIds), triggers, applied: state.applied }, step };
+}
+
+function parseCueResult(result: string): CueApplied | null {
+  if (result === "paused") return { kind: "pause" };
+  const lowered = /^lowered (\d+) (\d+)$/.exec(result);
+  return lowered === null
+    ? null
+    : { kind: "lower-volume", from: Number(lowered[1]), to: Number(lowered[2]) };
+}
 
 // Scripts are fixed text. Anything from a request reaches them only as osascript argv.
 
@@ -66,7 +119,9 @@ function sample(Music) {
   if (state !== "stopped") {
     try {
       const p = Music.currentTrack.properties();
-      out.track = { id: p.persistentID, name: p.name, artist: p.artist, album: p.album, duration: p.duration };
+      // macOS 14 renamed "loved" to "favorited".
+      const favorited = p.favorited !== undefined ? p.favorited : p.loved;
+      out.track = { id: p.persistentID, name: p.name, artist: p.artist, album: p.album, duration: p.duration, favorited: favorited };
       out.position = Music.playerPosition();
     } catch (error) {}
     try { out.playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
@@ -162,8 +217,43 @@ const CONTROL_SCRIPT = `function run(argv) {
     case "volume": Music.soundVolume = Number(argv[1]); break;
     // Music ignores repeat changes unless a song is playing.
     case "repeat": Music.songRepeat = argv[1]; break;
+    case "favorite": {
+      const track = Music.currentTrack;
+      if (track.persistentID() !== argv[1]) return "mismatch";
+      const value = argv[2] === "true";
+      try { track.favorited = value; } catch (error) { track.loved = value; }
+      break;
+    }
   }
   return "ok";
+}`;
+
+// Never launches Music: running() asks the system, not the app.
+const CUE_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  if (!Music.running()) return "none";
+  switch (argv[0]) {
+    case "lower-volume": {
+      if (Music.playerState() !== "playing") return "none";
+      const from = Music.soundVolume();
+      const to = Math.round(from * Number(argv[1]));
+      if (to >= from) return "none";
+      Music.soundVolume = to;
+      return "lowered " + from + " " + Music.soundVolume();
+    }
+    case "pause":
+      if (Music.playerState() !== "playing") return "none";
+      Music.pause();
+      return "paused";
+    case "restore-volume":
+      // A volume the user changed meanwhile stays.
+      if (Math.abs(Music.soundVolume() - Number(argv[2])) <= 1) Music.soundVolume = Number(argv[1]);
+      return "ok";
+    case "resume":
+      if (Music.playerState() === "paused") Music.play();
+      return "ok";
+  }
+  return "none";
 }`;
 
 // AppleScript, because JXA cannot write artwork raw data to a file.
@@ -206,6 +296,10 @@ const MAX_ARTWORK_BYTES = 256 * 1024;
 const MAX_WATCH_LINE_CHARS = 16 * 1024;
 /** Clients extrapolate position while playing, so only a seek or stall needs a new state. */
 const POSITION_DRIFT_SECONDS = 2;
+const CUE_VOLUME_FACTOR = "0.3";
+/** Longer gaps between samples (a sleeping Mac, a stuck Music) are not counted as listening. */
+const MAX_CREDIT_SECONDS = 5;
+const STATS_FLUSH_INTERVAL = Duration.minutes(1);
 
 const UNSUPPORTED: MusicPlayerState = { _tag: "unsupported" };
 const NOT_RUNNING: MusicPlayerState = { _tag: "not-running" };
@@ -227,6 +321,7 @@ const RawSample = Schema.Struct({
         artist: Schema.optional(Schema.NullOr(Schema.String)),
         album: Schema.optional(Schema.NullOr(Schema.String)),
         duration: Schema.optional(Schema.NullOr(Schema.Number)),
+        favorited: Schema.optional(Schema.NullOr(Schema.Boolean)),
       }),
     ),
   ),
@@ -282,6 +377,9 @@ export function decodeWatchLine(line: string): MusicPlayerState | null {
             artist: text(sample.track.artist),
             album: text(sample.track.album),
             durationSec: seconds(sample.track.duration),
+            ...(typeof sample.track.favorited === "boolean"
+              ? { favorited: sample.track.favorited }
+              : {}),
           }
         : null,
     positionSec: seconds(sample.position),
@@ -350,6 +448,7 @@ const make = Effect.gen(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const listening = yield* MusicListeningStats;
   const supported = platform === "darwin";
 
   const states = yield* PubSub.sliding<MusicPlayerState>(16);
@@ -359,12 +458,35 @@ const make = Effect.gen(function* () {
   const subscriberLock = yield* Semaphore.make(1);
   const subscriberCount = yield* Ref.make(0);
   const watcher = yield* FiberHandle.make<void, never>();
+  const lastSample = yield* Ref.make<EmittedMusicState | null>(null);
+  const workingProjectIds = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const cueState = yield* Ref.make<CueState>(INITIAL_CUE_STATE);
+  const cueLock = yield* Semaphore.make(1);
+
+  // Credits the time since the previous sample to the song that was playing then.
+  const creditSample = Effect.fnUntraced(function* (state: MusicPlayerState, now: number) {
+    const previous = yield* Ref.getAndSet(lastSample, { state, atMs: now });
+    if (previous === null) return;
+    const before = previous.state;
+    if (before._tag !== "ready" || before.playback !== "playing" || before.track === null) return;
+    const elapsed = (now - previous.atMs) / 1000;
+    if (!(elapsed > 0) || elapsed > MAX_CREDIT_SECONDS) return;
+    yield* listening.credit({
+      day: localDayKey(previous.atMs),
+      trackId: before.track.id,
+      name: before.track.name,
+      artist: before.track.artist,
+      seconds: elapsed,
+      projectIds: [...(yield* Ref.get(workingProjectIds))],
+    });
+  });
 
   // Per-sample work, about once a second while anyone watches; the watcher run owns the span.
   const update = Effect.fnUntraced(function* (state: MusicPlayerState) {
     yield* updateLock.withPermits(1)(
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
+        yield* creditSample(state, now);
         yield* Ref.set(latest, Option.some(state));
         if (!musicStateChanged(yield* Ref.get(lastEmitted), state, now)) return;
         yield* Ref.set(lastEmitted, { state, atMs: now });
@@ -406,6 +528,11 @@ const make = Effect.gen(function* () {
   // Restart after a crash, a quit Music app, or a permission change in System Settings.
   const watchLoop = Effect.forever(
     runWatcherOnce().pipe(Effect.andThen(Effect.sleep(WATCH_RESTART_DELAY))),
+  ).pipe(
+    Effect.raceFirst(
+      Effect.forever(Effect.sleep(STATS_FLUSH_INTERVAL).pipe(Effect.andThen(listening.flush))),
+    ),
+    Effect.ensuring(Ref.set(lastSample, null).pipe(Effect.andThen(listening.flush))),
   );
 
   const retain = subscriberLock.withPermits(1)(
@@ -566,6 +693,8 @@ const make = Effect.gen(function* () {
         return ["volume", String(input.volume)];
       case "set-repeat":
         return ["repeat", input.mode];
+      case "set-favorited":
+        return ["favorite", input.trackId, String(input.favorited)];
       default:
         return [input._tag];
     }
@@ -574,6 +703,58 @@ const make = Effect.gen(function* () {
   const control = Effect.fn("MusicPlayer.control")(function* (input: MusicControlInput) {
     yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
   });
+
+  const applyCue = Effect.fn("MusicPlayer.applyCue")(function* (cue: "lower-volume" | "pause") {
+    const result = yield* runScript("control", "JavaScript", CUE_SCRIPT, [cue, CUE_VOLUME_FACTOR]);
+    return parseCueResult(result);
+  });
+
+  const restoreCue = Effect.fn("MusicPlayer.restoreCue")(function* (applied: CueApplied) {
+    yield* runScript(
+      "control",
+      "JavaScript",
+      CUE_SCRIPT,
+      applied.kind === "pause"
+        ? ["resume"]
+        : ["restore-volume", String(applied.from), String(applied.to)],
+    );
+  });
+
+  const observeAgents = Effect.fn("MusicPlayer.observeAgents")(function* (
+    activity: AgentActivity,
+    cue: MusicAgentCue,
+  ) {
+    yield* Ref.set(workingProjectIds, activity.workingProjectIds);
+    if (!supported) return;
+    yield* cueLock.withPermits(1)(
+      Effect.gen(function* () {
+        const { next, step } = planCue(
+          yield* Ref.get(cueState),
+          activity.requestIds,
+          activity.initial,
+        );
+        let applied = next.applied;
+        if (step === "apply" && cue !== "off") {
+          applied = yield* applyCue(cue).pipe(Effect.orElseSucceed(() => null));
+        } else if (step === "restore" && applied !== null) {
+          yield* restoreCue(applied).pipe(Effect.ignore);
+          applied = null;
+        }
+        yield* Ref.set(cueState, { ...next, applied });
+      }),
+    );
+  });
+
+  // Music should not stay quiet or paused because the server stopped mid-request.
+  yield* Effect.addFinalizer(() =>
+    cueLock.withPermits(1)(
+      Ref.get(cueState).pipe(
+        Effect.flatMap(({ applied }) =>
+          applied === null ? Effect.void : restoreCue(applied).pipe(Effect.ignore),
+        ),
+      ),
+    ),
+  );
 
   const extractArtwork = Effect.fn("MusicPlayer.extractArtwork")(function* (trackId: string) {
     const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-music-" });
@@ -625,6 +806,11 @@ const make = Effect.gen(function* () {
     playTrack,
     control,
     artwork,
+    stats: Effect.fn("MusicPlayer.stats")(function* (input: MusicStatsInput) {
+      if (!supported) return yield* new MusicError({ operation: "stats", reason: "unsupported" });
+      return yield* listening.summary(input);
+    }),
+    observeAgents,
   });
 });
 

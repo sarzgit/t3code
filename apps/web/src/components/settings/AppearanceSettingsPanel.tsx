@@ -13,6 +13,7 @@ import {
   MIN_GLASS_OPACITY,
   MIN_PANEL_ANIMATION_DURATION_MS,
 } from "@t3tools/contracts/settings";
+import type { MusicAgentCue } from "@t3tools/contracts";
 import {
   resolveSidebarStageBackdropVariant,
   type SidebarStageBackdropVariant,
@@ -78,6 +79,12 @@ const CHAT_WIDTH_LABELS: Record<ChatWidth, string> = {
   comfortable: "Comfortable",
   wide: "Wide",
   full: "Full",
+};
+
+const MUSIC_AGENT_CUE_LABELS: Record<MusicAgentCue, string> = {
+  "lower-volume": "Lower volume",
+  pause: "Pause",
+  off: "Do nothing",
 };
 
 const EFFORT_DISPLAY_LABELS: Record<EffortDisplay, string> = {
@@ -374,6 +381,44 @@ export function AppearanceSettingsPanel() {
               }
               aria-label="Show music player"
             />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("music-agent-cue")}
+          description="What the Music app does while an agent waits for your approval or answer. Music comes back once you reply."
+          resetAction={
+            settings.musicAgentCue !== DEFAULT_UNIFIED_SETTINGS.musicAgentCue ? (
+              <SettingResetButton
+                label="music agent cue"
+                onClick={() =>
+                  updateSettings({ musicAgentCue: DEFAULT_UNIFIED_SETTINGS.musicAgentCue })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="w-full sm:w-40">
+              <Select
+                value={settings.musicAgentCue}
+                onValueChange={(value) => {
+                  if (value === "off" || value === "lower-volume" || value === "pause")
+                    updateSettings({ musicAgentCue: value });
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full min-w-0"
+                  aria-label="When an agent needs you"
+                >
+                  <SelectValue>{MUSIC_AGENT_CUE_LABELS[settings.musicAgentCue]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem value="lower-volume">Lower volume</SelectItem>
+                  <SelectItem value="pause">Pause</SelectItem>
+                  <SelectItem value="off">Do nothing</SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
           }
         />
         <AdvancedSettings

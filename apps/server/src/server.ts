@@ -87,6 +87,8 @@ import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
+import * as MusicAgentWatch from "./music/MusicAgentWatch.ts";
+import * as MusicListeningStats from "./music/MusicListeningStats.ts";
 import * as MusicPlayer from "./music/MusicPlayer.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -510,7 +512,10 @@ const layerDevice = DeviceService.layer.pipe(
   Layer.provide(NetService.layer),
 );
 
-const layerMusic = MusicPlayer.layer.pipe(Layer.provide(ProcessRunner.layer));
+const layerMusic = MusicPlayer.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(MusicListeningStats.layer),
+);
 
 const layerWorkspaceEntries = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));
 
@@ -685,6 +690,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const watch = yield* MusicAgentWatch.MusicAgentWatch;
+      yield* watch.start();
+    }),
+  ).pipe(Layer.provide(MusicAgentWatch.layer)),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ProviderInstallation.layer,

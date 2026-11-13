@@ -3222,6 +3222,7 @@ export const layerWsRpc = (
         [WS_METHODS.musicPlayTrack]: (input) => musicPlayer.playTrack(input),
         [WS_METHODS.musicControl]: (input) => musicPlayer.control(input),
         [WS_METHODS.musicGetArtwork]: (input) => musicPlayer.artwork(input),
+        [WS_METHODS.musicGetStats]: (input) => musicPlayer.stats(input),
         [WS_METHODS.previewStopLocalServer]: (input) => portDiscovery.stopServer(input),
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
           Stream.callback<DiscoveredLocalServerList>((queue) =>

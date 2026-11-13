@@ -55,8 +55,18 @@ When your T3 Code server runs on a Mac, the bottom of the sidebar shows what the
 playing, with a seek bar, shuffle, previous, play/pause, next, repeat, and Music's volume. Click the
 song to open your library playlists; click a playlist to see its songs, search them, and start one,
 or use **Play** and **Shuffle** for the whole playlist. The command palette also has
-**Music: Play/Pause**, **Next track**, and **Previous track**. Audio plays on the Mac running the
-server, even when you control it from another device.
+**Music: Play/Pause**, **Next track**, and **Previous track**, bound by default to ⌘⌥P, ⌘⌥. and ⌘⌥,
+(Ctrl+Alt elsewhere); change them under **Settings → Keybindings**. The heart beside the song
+favorites it in Music. Audio plays on the Mac running the server, even when you control it from
+another device.
+
+When an agent asks for approval or a question, Music lowers its volume until you answer. Choose
+**Pause** or **Do nothing** under **Settings → Appearance → When an agent needs you**. Nothing happens
+if Music isn't playing.
+
+The **Stats** tab shows how long you listened today, this week or this month, your top artists and
+songs, and how much of it was while an agent worked in each project. Listening counts only while T3
+Code is open.
 
 Only playlists in your Music library appear; add an Apple Music playlist to your library to play it
 here. Pin a playlist to keep it at the top of the list, or remove one you never play from T3 Code's

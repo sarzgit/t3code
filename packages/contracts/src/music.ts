@@ -2,6 +2,8 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
+import { ProjectId } from "./baseSchemas.ts";
+
 const MUSIC_PERSISTENT_ID_PATTERN = /^[0-9A-F]{16}$/;
 
 /** Music app persistent ids are 16 hex digits. */
@@ -70,6 +72,8 @@ export const MusicTrack = Schema.Struct({
   artist: MusicText,
   album: MusicText,
   durationSec: Schema.Number,
+  // Absent from a server before favorites, or when Music can't report it.
+  favorited: Schema.optionalKey(Schema.Boolean),
 });
 export type MusicTrack = typeof MusicTrack.Type;
 
@@ -155,6 +159,8 @@ export const MusicControlInput = Schema.Union([
   }),
   Schema.TaggedStruct("set-volume", { volume: MusicVolume }),
   Schema.TaggedStruct("set-repeat", { mode: MusicRepeatMode }),
+  /** Names the track so a click never favorites the song that replaced it. */
+  Schema.TaggedStruct("set-favorited", { trackId: MusicPersistentId, favorited: Schema.Boolean }),
 ]);
 export type MusicControlInput = typeof MusicControlInput.Type;
 
@@ -167,6 +173,25 @@ export const MusicArtwork = Schema.Struct({
 });
 export type MusicArtwork = typeof MusicArtwork.Type;
 
+export const MusicStatsInput = Schema.Struct({ days: Schema.Literals([1, 7, 30]) });
+export type MusicStatsInput = typeof MusicStatsInput.Type;
+
+export const MusicStats = Schema.Struct({
+  totalSec: Schema.Number,
+  /** One entry per day in the range, oldest first, in the server's local time. */
+  days: Schema.Array(Schema.Struct({ date: Schema.String, seconds: Schema.Number })),
+  artists: Schema.Array(Schema.Struct({ name: MusicText, seconds: Schema.Number })),
+  tracks: Schema.Array(
+    Schema.Struct({ name: MusicText, artist: MusicText, seconds: Schema.Number }),
+  ),
+  /** Time listened while an agent was working in each project. */
+  projects: Schema.Array(Schema.Struct({ projectId: ProjectId, seconds: Schema.Number })),
+});
+export type MusicStats = typeof MusicStats.Type;
+
+export const MusicAgentCue = Schema.Literals(["off", "lower-volume", "pause"]);
+export type MusicAgentCue = typeof MusicAgentCue.Type;
+
 export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
   operation: Schema.Literals([
     "list-playlists",
@@ -175,6 +200,7 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
     "play-track",
     "control",
     "artwork",
+    "stats",
   ]),
   reason: Schema.Literals(["unsupported", "permission-denied", "not-found", "unavailable"]),
   cause: Schema.optional(Schema.Defect()),

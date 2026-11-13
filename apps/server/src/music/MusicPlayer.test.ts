@@ -1,6 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type { MusicPlayerState } from "@t3tools/contracts";
+import { type MusicPlayerState, ProjectId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -14,6 +14,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as MusicListeningStats from "./MusicListeningStats.ts";
 import * as MusicPlayer from "./MusicPlayer.ts";
 
 const output = (
@@ -97,6 +98,7 @@ const providePlayer = (
     MusicPlayer.layer.pipe(
       Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
       Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
+      Layer.provide(MusicListeningStats.layerMemory),
       Layer.provide(NodeServices.layer),
     ),
   );
@@ -117,7 +119,19 @@ describe("decodeWatchLine", () => {
     });
     assert.deepStrictEqual(
       MusicPlayer.decodeWatchLine(
-        sampleLine({ state: "fast forwarding", volume: 62.4, repeat: "one" }),
+        sampleLine({
+          state: "fast forwarding",
+          volume: 62.4,
+          repeat: "one",
+          track: {
+            id: "3BA40D4A07B97011",
+            name: "Song",
+            artist: "Artist",
+            album: "Album",
+            duration: 200,
+            favorited: true,
+          },
+        }),
       ),
       {
         _tag: "ready",
@@ -128,6 +142,7 @@ describe("decodeWatchLine", () => {
           artist: "Artist",
           album: "Album",
           durationSec: 200,
+          favorited: true,
         },
         positionSec: 10,
         shuffle: false,
@@ -212,6 +227,22 @@ describe("musicStateChanged", () => {
       "track changed",
       { state: ready(), atMs: 0 },
       ready({ track: null, positionSec: 10 }),
+      0,
+      true,
+    ],
+    [
+      "favorited",
+      { state: ready(), atMs: 0 },
+      ready({
+        track: {
+          id: "3BA40D4A07B97011",
+          name: "A",
+          artist: "B",
+          album: "C",
+          durationSec: 200,
+          favorited: true,
+        },
+      }),
       0,
       true,
     ],
@@ -337,13 +368,19 @@ describe("MusicPlayer", () => {
           trackId: "BBBBBBBBBBBBBBBB",
           index: 3,
         });
-        const tails = (yield* Ref.get(calls)).slice(-5).map((call) => call.slice(5));
+        yield* player.control({
+          _tag: "set-favorited",
+          trackId: "BBBBBBBBBBBBBBBB",
+          favorited: true,
+        });
+        const tails = (yield* Ref.get(calls)).slice(-6).map((call) => call.slice(5));
         assert.deepStrictEqual(tails, [
           ["seek", "42.5"],
           ["volume", "30"],
           ["repeat", "one"],
           ["AAAAAAAAAAAAAAAA", "shuffle-off"],
           ["AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB", "3"],
+          ["favorite", "BBBBBBBBBBBBBBBB", "true"],
         ]);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
@@ -415,5 +452,95 @@ describe("MusicPlayer", () => {
         assert.strictEqual((yield* Ref.get(calls)).length, callsAfterFound);
       }).pipe(providePlayer(runner), Effect.scoped);
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+  it.effect("lowers Music for a new agent request and restores it once answered", () =>
+    Effect.gen(function* () {
+      const { calls, runner } = yield* makeHarness({
+        respond: (args) =>
+          Effect.succeed(
+            output({ stdout: args.includes("lower-volume") ? "lowered 80 24\n" : "ok\n" }),
+          ),
+      });
+      const activity = (requestIds: ReadonlyArray<string>, initial = false) => ({
+        requestIds: new Set(requestIds),
+        workingProjectIds: new Set<string>(),
+        initial,
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const cueArgs = Effect.map(Ref.get(calls), (all) => all.map((call) => call.slice(5)));
+
+        // A request already open at startup never lowers the volume.
+        yield* player.observeAgents(activity(["stale"], true), "lower-volume");
+        yield* player.observeAgents(activity(["stale", "new"]), "lower-volume");
+        // A second request while lowered does not lower again.
+        yield* player.observeAgents(activity(["stale", "new", "other"]), "lower-volume");
+        yield* player.observeAgents(activity(["stale", "other"]), "lower-volume");
+        assert.deepStrictEqual(yield* cueArgs, [["lower-volume", "0.3"]]);
+
+        // Restores only when every request that arrived since is answered; stale ones don't count.
+        yield* player.observeAgents(activity(["stale"]), "lower-volume");
+        assert.deepStrictEqual((yield* cueArgs).at(-1), ["restore-volume", "80", "24"]);
+
+        yield* player.observeAgents(activity(["stale", "later"]), "off");
+        assert.strictEqual((yield* cueArgs).length, 2);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("resumes music it paused when the server stops", () =>
+    Effect.gen(function* () {
+      const { calls, runner } = yield* makeHarness({
+        respond: (args) =>
+          Effect.succeed(output({ stdout: args.includes("pause") ? "paused\n" : "ok\n" })),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        yield* player.observeAgents(
+          { requestIds: new Set(["new"]), workingProjectIds: new Set(), initial: false },
+          "pause",
+        );
+      }).pipe(providePlayer(runner), Effect.scoped);
+      assert.deepStrictEqual(
+        (yield* Ref.get(calls)).map((call) => call.slice(5)),
+        [["pause", "0.3"], ["resume"]],
+      );
+    }),
+  );
+
+  it.effect("credits playing time to the song and to projects with a working agent", () =>
+    Effect.gen(function* () {
+      const { sessions, runner } = yield* makeHarness();
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        yield* player.observeAgents(
+          { requestIds: new Set(), workingProjectIds: new Set(["project-1"]), initial: true },
+          "off",
+        );
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        session.emit(sampleLine({ state: "playing" }));
+        yield* Queue.take(received);
+        yield* TestClock.adjust("1 second");
+        session.emit(sampleLine({ state: "playing", position: 11 }));
+        yield* TestClock.adjust("1 second");
+        session.emit(sampleLine({ state: "paused", position: 12 }));
+        yield* Queue.take(received);
+        // Paused time and a gap longer than a few seconds are not listening.
+        yield* TestClock.adjust("1 minute");
+        session.emit(sampleLine({ state: "playing", position: 12 }));
+        yield* Queue.take(received);
+        yield* TestClock.adjust("30 seconds");
+        session.emit(sampleLine({ state: "playing", position: 42 }));
+
+        const stats = yield* player.stats({ days: 1 });
+        assert.strictEqual(stats.totalSec, 2);
+        assert.deepStrictEqual(stats.tracks, [{ name: "Song", artist: "Artist", seconds: 2 }]);
+        assert.deepStrictEqual(stats.artists, [{ name: "Artist", seconds: 2 }]);
+        assert.deepStrictEqual(stats.projects, [
+          { projectId: ProjectId.make("project-1"), seconds: 2 },
+        ]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
   );
 });

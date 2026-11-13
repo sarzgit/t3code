@@ -470,6 +470,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.musicPlayerEnabled !== DEFAULT_UNIFIED_SETTINGS.musicPlayerEnabled
       ? ["Music player"]
       : []),
+    ...(settings.musicAgentCue !== DEFAULT_UNIFIED_SETTINGS.musicAgentCue
+      ? ["When an agent needs you"]
+      : []),
     ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
       ? ["Panel animations"]
       : []),
@@ -652,6 +655,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       effortDisplay: DEFAULT_UNIFIED_SETTINGS.effortDisplay,
       mathRenderingEnabled: DEFAULT_UNIFIED_SETTINGS.mathRenderingEnabled,
       musicPlayerEnabled: DEFAULT_UNIFIED_SETTINGS.musicPlayerEnabled,
+      musicAgentCue: DEFAULT_UNIFIED_SETTINGS.musicAgentCue,
       language: DEFAULT_UNIFIED_SETTINGS.language,
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
