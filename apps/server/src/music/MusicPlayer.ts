@@ -184,7 +184,8 @@ on run argv
     if (count of artworks of t) is 0 then return "none"
     set artData to raw data of artwork 1 of t
   end tell
-  set fileRef to open for access (POSIX file outPath) with write permission
+  -- "POSIX file outPath" fails under "use framework" (-1700); the coercion form works.
+  set fileRef to open for access (outPath as POSIX file) with write permission
   try
     set eof fileRef to 0
     write artData to fileRef
