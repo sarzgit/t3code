@@ -205,7 +205,50 @@ const PLAY_TRACK_SCRIPT = `function run(argv) {
   const target = ids[index] === argv[1] ? index : ids.indexOf(argv[1]);
   if (target < 0) return "not-found";
   tracks[target].play();
-  return "ok";
+  return "ok:" + target;
+}`;
+
+// Music plays a scripted song alone: at its end playback stops, and next or previous only
+// restart it. So the server moves through the playlist itself, one song at a time.
+const STEP_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  if (argv[3] === "advance") {
+    if (!Music.running()) return "gone";
+    const playback = Music.playerState();
+    if (playback === "paused") return "hold";
+    if (playback !== "stopped") {
+      if (Music.currentTrack.persistentID() !== argv[1]) return "changed";
+      if (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4) return "hold";
+    }
+  }
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const previous = argv[3] === "previous";
+  const restart = () => { Music.playerPosition = 0; return "restart"; };
+  if (previous && Music.playerPosition() > 3) return restart();
+  if (Music.shuffleEnabled()) {
+    if (previous) return restart();
+    // Music shuffles a whole playlist itself, so it can take over from here.
+    found[0].play();
+    Music.shuffleEnabled = true;
+    return "playlist";
+  }
+  const tracks = found[0].tracks;
+  const ids = tracks.persistentID();
+  const given = Number(argv[2]);
+  const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
+  if (current < 0) return "not-found";
+  let target = current + (previous ? -1 : 1);
+  if (target < 0 || target >= ids.length) {
+    if (Music.songRepeat() !== "all") {
+      if (previous) return restart();
+      Music.stop();
+      return "end";
+    }
+    target = (target + ids.length) % ids.length;
+  }
+  tracks[target].play();
+  return "ok:" + target + ":" + ids[target];
 }`;
 
 const CONTROL_SCRIPT = `function run(argv) {
@@ -434,6 +477,87 @@ export function musicStateChanged(
   return Math.abs(next.positionSec - expected) > POSITION_DRIFT_SECONDS;
 }
 
+/** A song played from a playlist, which the server keeps moving through (see STEP_SCRIPT). */
+export interface PickedSong {
+  readonly playlistId: string;
+  readonly trackId: string;
+  readonly index: number;
+  readonly startedAtMs: number;
+  /** False until the watcher reports the song; Music takes a moment to switch. */
+  readonly seen: boolean;
+  readonly positionSec: number;
+  readonly durationSec: number;
+}
+
+/** The watcher samples once a second, so the last playing sample can be a few seconds early. */
+const SONG_END_MARGIN_SECONDS = 4;
+const PICK_SETTLE_MS = 5_000;
+
+export const pickSong = (
+  playlistId: string,
+  trackId: string,
+  index: number,
+  startedAtMs: number,
+): PickedSong => ({
+  playlistId,
+  trackId,
+  index,
+  startedAtMs,
+  seen: false,
+  positionSec: 0,
+  durationSec: 0,
+});
+
+export type PickedSongUpdate =
+  | { readonly _tag: "follow"; readonly picked: PickedSong; readonly hide: boolean }
+  | { readonly _tag: "advance" }
+  | { readonly _tag: "drop" };
+
+/**
+ * What one watcher sample means for the picked song. `hide` holds back a stopped sample
+ * that only reflects the gap before the next song starts.
+ */
+export function followPickedSong(
+  picked: PickedSong,
+  state: MusicPlayerState,
+  nowMs: number,
+): PickedSongUpdate {
+  if (state._tag === "unavailable" || state._tag === "permission-denied") {
+    return { _tag: "follow", picked, hide: false };
+  }
+  if (state._tag !== "ready") return { _tag: "drop" };
+  const track = state.playback === "stopped" ? null : state.track;
+  if (!picked.seen && track?.id !== picked.trackId) {
+    const settling = nowMs - picked.startedAtMs < PICK_SETTLE_MS;
+    if (track !== null && !settling) return { _tag: "drop" };
+    return { _tag: "follow", picked, hide: track === null && settling };
+  }
+  const nearEnd =
+    picked.durationSec > 0 && picked.positionSec >= picked.durationSec - SONG_END_MARGIN_SECONDS;
+  if (track === null)
+    return nearEnd ? { _tag: "advance" } : { _tag: "follow", picked, hide: false };
+  if (track.id !== picked.trackId) return { _tag: "drop" };
+  // With repeat all, Music loops a lone song instead of stopping.
+  if (
+    nearEnd &&
+    state.playback === "playing" &&
+    state.repeat === "all" &&
+    state.positionSec < SONG_END_MARGIN_SECONDS
+  ) {
+    return { _tag: "advance" };
+  }
+  return {
+    _tag: "follow",
+    picked: {
+      ...picked,
+      seen: true,
+      positionSec: state.positionSec,
+      durationSec: track.durationSec,
+    },
+    hide: false,
+  };
+}
+
 const isPermissionDenied = (output: ProcessRunner.ProcessRunOutput) =>
   output.stderr.includes("-1743");
 
@@ -492,8 +616,98 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const runScript = Effect.fn("MusicPlayer.runScript")(function* (
+    operation: MusicError["operation"],
+    language: "JavaScript" | "AppleScript",
+    script: string,
+    args: ReadonlyArray<string>,
+    maxOutputBytes = 1024 * 1024,
+  ) {
+    if (!supported) return yield* new MusicError({ operation, reason: "unsupported" });
+    const output = yield* runner
+      .run({
+        command: "osascript",
+        args: [
+          "-l",
+          language,
+          "-e",
+          language === "JavaScript" ? JXA_NO_DOCK_ICON + script : script,
+          ...args,
+        ],
+        timeout: SCRIPT_TIMEOUT,
+        maxOutputBytes,
+      })
+      .pipe(
+        Effect.mapError((cause) => new MusicError({ operation, reason: "unavailable", cause })),
+      );
+    if (output.code !== 0) {
+      return yield* new MusicError({
+        operation,
+        reason: isPermissionDenied(output) ? "permission-denied" : "unavailable",
+      });
+    }
+    return output.stdout.trim();
+  });
+
+  // Held while a song is picked or stepped, so the watcher judges samples against the song
+  // Music was last told to play. Songs only advance on their own while someone watches.
+  const pickLock = yield* Semaphore.make(1);
+  const picked = yield* Ref.make<PickedSong | null>(null);
+  let sampleVersion = 0;
+
+  const stepPicked = Effect.fn("MusicPlayer.stepPickedSong")(function* (
+    from: PickedSong,
+    direction: "next" | "previous" | "advance",
+  ) {
+    const result = yield* runScript("control", "JavaScript", STEP_SCRIPT, [
+      from.playlistId,
+      from.trackId,
+      String(from.index),
+      direction,
+    ]);
+    const [outcome, index, trackId] = result.split(":");
+    if (outcome === "ok" || outcome === "restart" || outcome === "playlist" || outcome === "end") {
+      sampleVersion++;
+    }
+    const nextId = persistentId(trackId);
+    const now = yield* Clock.currentTimeMillis;
+    const next =
+      outcome === "ok" && nextId !== null
+        ? pickSong(from.playlistId, nextId, Number(index), now)
+        : outcome === "restart"
+          ? { ...from, positionSec: 0 }
+          : outcome === "hold"
+            ? from
+            : null;
+    yield* Ref.set(picked, next);
+    return outcome;
+  });
+
+  /** Whether to hold back this sample from subscribers. */
+  const followSample = (state: MusicPlayerState, version: number) =>
+    pickLock.withPermits(1)(
+      Effect.gen(function* () {
+        if (version !== sampleVersion) return true;
+        const current = yield* Ref.get(picked);
+        if (current === null) return false;
+        const decision = followPickedSong(current, state, yield* Clock.currentTimeMillis);
+        switch (decision._tag) {
+          case "follow":
+            yield* Ref.set(picked, decision.picked);
+            return decision.hide;
+          case "drop":
+            yield* Ref.set(picked, null);
+            return false;
+          case "advance":
+            yield* stepPicked(current, "advance").pipe(Effect.catch(() => Ref.set(picked, null)));
+            return true;
+        }
+      }),
+    );
+
   // Per-sample work, about once a second while anyone watches; the watcher run owns the span.
-  const update = Effect.fnUntraced(function* (state: MusicPlayerState) {
+  const update = Effect.fnUntraced(function* (state: MusicPlayerState, version = sampleVersion) {
+    if (yield* followSample(state, version)) return;
     yield* updateLock.withPermits(1)(
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
@@ -507,15 +721,16 @@ const make = Effect.gen(function* () {
   });
 
   const runWatcherOnce = Effect.fn("MusicPlayer.watch")(function* () {
-    const lines = yield* Queue.unbounded<string>();
+    const lines = yield* Queue.unbounded<{ readonly line: string; readonly version: number }>();
     const split = makeLineSplitter((line) => {
-      Queue.offerUnsafe(lines, line);
+      // A successful playback control invalidates samples captured before it finished.
+      Queue.offerUnsafe(lines, { line, version: sampleVersion });
     });
     const consume = Effect.forever(
       Queue.take(lines).pipe(
-        Effect.flatMap((line) => {
+        Effect.flatMap(({ line, version }) => {
           const state = decodeWatchLine(line);
-          return state === null ? Effect.void : update(state);
+          return state === null ? Effect.void : update(state, version);
         }),
       ),
     );
@@ -583,39 +798,6 @@ const make = Effect.gen(function* () {
       )
     : Stream.concat(Stream.make(UNSUPPORTED), Stream.never);
 
-  const runScript = Effect.fn("MusicPlayer.runScript")(function* (
-    operation: MusicError["operation"],
-    language: "JavaScript" | "AppleScript",
-    script: string,
-    args: ReadonlyArray<string>,
-    maxOutputBytes = 1024 * 1024,
-  ) {
-    if (!supported) return yield* new MusicError({ operation, reason: "unsupported" });
-    const output = yield* runner
-      .run({
-        command: "osascript",
-        args: [
-          "-l",
-          language,
-          "-e",
-          language === "JavaScript" ? JXA_NO_DOCK_ICON + script : script,
-          ...args,
-        ],
-        timeout: SCRIPT_TIMEOUT,
-        maxOutputBytes,
-      })
-      .pipe(
-        Effect.mapError((cause) => new MusicError({ operation, reason: "unavailable", cause })),
-      );
-    if (output.code !== 0) {
-      return yield* new MusicError({
-        operation,
-        reason: isPermissionDenied(output) ? "permission-denied" : "unavailable",
-      });
-    }
-    return output.stdout.trim();
-  });
-
   const listPlaylists = runScript("list-playlists", "JavaScript", LIST_SCRIPT, []).pipe(
     Effect.flatMap((stdout) =>
       Option.match(decodeRawPlaylists(stdout), {
@@ -647,7 +829,9 @@ const make = Effect.gen(function* () {
     if (result === "not-found") {
       return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
     }
-  });
+    sampleVersion++;
+    yield* Ref.set(picked, null);
+  }, pickLock.withPermits(1));
 
   const listTracks = Effect.fn("MusicPlayer.listTracks")(function* (input: MusicListTracksInput) {
     const result = yield* runScript(
@@ -692,7 +876,18 @@ const make = Effect.gen(function* () {
     if (result === "not-found") {
       return yield* new MusicError({ operation: "play-track", reason: "not-found" });
     }
-  });
+    sampleVersion++;
+    const index = Number(result.split(":")[1]);
+    yield* Ref.set(
+      picked,
+      pickSong(
+        input.playlistId,
+        input.trackId,
+        Number.isInteger(index) ? index : input.index,
+        yield* Clock.currentTimeMillis,
+      ),
+    );
+  }, pickLock.withPermits(1));
 
   const controlArgs = (input: MusicControlInput): ReadonlyArray<string> => {
     switch (input._tag) {
@@ -712,13 +907,33 @@ const make = Effect.gen(function* () {
   };
 
   const control = Effect.fn("MusicPlayer.control")(function* (input: MusicControlInput) {
+    if (input._tag === "next" || input._tag === "previous") {
+      const current = yield* Ref.get(picked);
+      // A playlist that is gone leaves Music's own next and previous to act.
+      if (current !== null && (yield* stepPicked(current, input._tag)) !== "not-found") return;
+    }
     yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
-  });
+    if (
+      input._tag === "seek" ||
+      input._tag === "play-pause" ||
+      input._tag === "next" ||
+      input._tag === "previous"
+    ) {
+      sampleVersion++;
+    }
+    if (input._tag === "seek") {
+      yield* Ref.update(picked, (current) =>
+        current === null ? null : { ...current, positionSec: input.positionSec },
+      );
+    }
+  }, pickLock.withPermits(1));
 
   const applyCue = Effect.fn("MusicPlayer.applyCue")(function* (cue: "lower-volume" | "pause") {
     const result = yield* runScript("control", "JavaScript", CUE_SCRIPT, [cue, CUE_VOLUME_FACTOR]);
-    return parseCueResult(result);
-  });
+    const applied = parseCueResult(result);
+    if (applied?.kind === "pause") sampleVersion++;
+    return applied;
+  }, pickLock.withPermits(1));
 
   const restoreCue = Effect.fn("MusicPlayer.restoreCue")(function* (applied: CueApplied) {
     yield* runScript(
@@ -729,7 +944,8 @@ const make = Effect.gen(function* () {
         ? ["resume", applied.trackId, String(applied.positionSec)]
         : ["restore-volume", String(applied.from), String(applied.to)],
     );
-  });
+    if (applied.kind === "pause") sampleVersion++;
+  }, pickLock.withPermits(1));
 
   const observeAgents = Effect.fn("MusicPlayer.observeAgents")(function* (
     activity: AgentActivity,

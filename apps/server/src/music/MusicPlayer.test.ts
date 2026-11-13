@@ -1,3 +1,4 @@
+import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { type MusicPlayerState, ProjectId } from "@t3tools/contracts";
@@ -251,7 +252,253 @@ describe("musicStateChanged", () => {
   });
 });
 
+describe("followPickedSong", () => {
+  const SONG = "3BA40D4A07B97011";
+  const fresh = MusicPlayer.pickSong("5CA38D01224697B3", SONG, 2, 0);
+  const seen = { ...fresh, seen: true, positionSec: 100, durationSec: 200 };
+  const nearEnd = { ...seen, positionSec: 197 };
+  const sample = (overrides: Partial<Extract<MusicPlayerState, { _tag: "ready" }>> = {}) =>
+    ({
+      _tag: "ready",
+      playback: "playing",
+      track: { id: SONG, name: "A", artist: "B", album: "C", durationSec: 200 },
+      positionSec: 101,
+      shuffle: false,
+      playlistId: "5CA38D01224697B3",
+      repeat: "off",
+      ...overrides,
+    }) satisfies MusicPlayerState;
+  const other = { id: "DD038AB38CFE38BB", name: "X", artist: "Y", album: "Z", durationSec: 90 };
+  const stopped = sample({ playback: "stopped", track: null, positionSec: 0 });
+
+  it.each([
+    [
+      "the old song plays on while Music switches",
+      fresh,
+      sample({ track: other }),
+      1_000,
+      "follow",
+    ],
+    ["the gap before the picked song starts", fresh, stopped, 1_000, "hidden"],
+    ["another song after Music had time to switch", fresh, sample({ track: other }), 6_000, "drop"],
+    ["the picked song playing", seen, sample(), 0, "follow"],
+    ["Music stopped at the end of the song", nearEnd, stopped, 0, "advance"],
+    ["Music stopped mid-song", seen, stopped, 0, "follow"],
+    ["someone played another song", seen, sample({ track: other }), 0, "drop"],
+    [
+      "repeat all looped the lone song",
+      nearEnd,
+      sample({ positionSec: 1, repeat: "all" }),
+      0,
+      "advance",
+    ],
+    ["repeat one looped the song", nearEnd, sample({ positionSec: 1, repeat: "one" }), 0, "follow"],
+    ["watcher unavailable", seen, { _tag: "unavailable" }, 0, "follow"],
+    ["permission temporarily denied", seen, { _tag: "permission-denied" }, 0, "follow"],
+    ["Music quit", seen, { _tag: "not-running" }, 0, "drop"],
+  ] as const)("%s", (_name, picked, state, nowMs, expected) => {
+    const update = MusicPlayer.followPickedSong(picked, state, nowMs);
+    assert.strictEqual(update._tag === "follow" && update.hide ? "hidden" : update._tag, expected);
+  });
+});
+
 describe("MusicPlayer", () => {
+  it.effect("moves a picked song on through its playlist", () =>
+    Effect.gen(function* () {
+      const playlistId = "5CA38D01224697B3";
+      const first = "3BA40D4A07B97011";
+      const second = "DD038AB38CFE38BB";
+      const steps = yield* Queue.unbounded<ReadonlyArray<string>>();
+      const { calls, sessions, runner } = yield* makeHarness({
+        respond: (args) => {
+          const tail = args.slice(5);
+          if (tail.length !== 4) return Effect.succeed(output({ stdout: "ok:2\n" }));
+          return Queue.offer(steps, tail).pipe(
+            Effect.as(output({ stdout: `ok:${Number(tail[2]) + 1}:${second}\n` })),
+          );
+        },
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId, trackId: first, index: 2 });
+
+        session.emit(sampleLine({ state: "playing", position: 197 }));
+        assert.strictEqual(yield* Queue.take(received).pipe(Effect.map((s) => s._tag)), "ready");
+        session.emit(sampleLine({ state: "stopped", track: null, position: 0 }));
+        const transition = yield* Queue.take(steps).pipe(
+          Effect.map((args) => ({ _tag: "step" as const, args })),
+          Effect.raceFirst(
+            Queue.take(received).pipe(Effect.map((state) => ({ _tag: "state" as const, state }))),
+          ),
+        );
+        assert.strictEqual(transition._tag, "step");
+        if (transition._tag === "step")
+          assert.deepStrictEqual(transition.args, [playlistId, first, "2", "advance"]);
+
+        // The stop between songs never reaches clients; the next song does.
+        session.emit(sampleLine({ state: "playing", track: { id: second, name: "Next" } }));
+        const next = yield* Queue.take(received);
+        assert.strictEqual(next._tag === "ready" && next.track?.id, second);
+
+        yield* player.control({ _tag: "next" });
+        assert.deepStrictEqual(yield* Queue.take(steps), [playlistId, second, "3", "next"]);
+
+        // A whole playlist plays as Music's own queue again.
+        yield* player.playPlaylist({ playlistId });
+        yield* player.control({ _tag: "next" });
+        assert.deepStrictEqual((yield* Ref.get(calls)).at(-1)!.slice(5), ["next"]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect.each(["previous", "seek-back-playing", "seek-back-paused", "seek-end"] as const)(
+    "tracks progress after %s without confusing a seek with a song ending",
+    (action) =>
+      Effect.gen(function* () {
+        const playlistId = "5CA38D01224697B3";
+        const first = "3BA40D4A07B97011";
+        const steps = yield* Queue.unbounded<ReadonlyArray<string>>();
+        const operationStarted = yield* Deferred.make<void>();
+        const finishOperation = yield* Deferred.make<void>();
+        const { sessions, runner } = yield* makeHarness({
+          respond: (args) => {
+            const tail = args.slice(5);
+            if (tail.at(-1) === "previous" || tail[0] === "seek")
+              return Effect.gen(function* () {
+                yield* Deferred.succeed(operationStarted, undefined);
+                yield* Deferred.await(finishOperation);
+                return output({ stdout: tail[0] === "seek" ? "ok" : "restart" });
+              });
+            if (tail.length === 4)
+              return Queue.offer(steps, tail).pipe(Effect.as(output({ stdout: "end" })));
+            return Effect.succeed(output({ stdout: "ok:2" }));
+          },
+        });
+        yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(sessions);
+          yield* player.playTrack({ playlistId, trackId: first, index: 2 });
+          session.emit(
+            sampleLine({
+              state: "playing",
+              position: action === "seek-end" ? 100 : 197,
+              repeat: "all",
+            }),
+          );
+          yield* Queue.take(received);
+          const control = yield* player
+            .control(
+              action === "previous"
+                ? { _tag: "previous" }
+                : { _tag: "seek", positionSec: action === "seek-end" ? 200 : 1 },
+            )
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(operationStarted);
+          session.emit(
+            sampleLine({
+              state: "playing",
+              position: action === "seek-end" ? 100 : 197,
+              repeat: "all",
+            }),
+          );
+          yield* Deferred.succeed(finishOperation, undefined);
+          yield* Fiber.join(control);
+          session.emit(
+            sampleLine(
+              action === "seek-end"
+                ? { state: "stopped", track: null, position: 0, repeat: "all" }
+                : {
+                    state: action === "seek-back-paused" ? "paused" : "playing",
+                    position: 1,
+                    repeat: "all",
+                  },
+            ),
+          );
+          const transition = yield* Queue.take(steps).pipe(
+            Effect.as("step"),
+            Effect.raceFirst(Queue.take(received).pipe(Effect.as("sample"))),
+          );
+          assert.strictEqual(transition, action === "seek-end" ? "step" : "sample");
+        }).pipe(providePlayer(runner), Effect.scoped);
+      }),
+  );
+
+  it.effect("does not advance a stale loop sample after the agent cue pauses Music", () =>
+    Effect.gen(function* () {
+      const first = "3BA40D4A07B97011";
+      const second = "DD038AB38CFE38BB";
+      const pauseStarted = yield* Deferred.make<void>();
+      const releasePause = yield* Deferred.make<void>();
+      const checkedAutomatic = yield* Deferred.make<void>();
+      const played: string[] = [];
+      let playback = "playing";
+      const tracks = Object.assign(
+        [first, second].map((id) => ({ play: () => played.push(id) })),
+        { persistentID: () => [first, second] },
+      );
+      const music = {
+        running: () => true,
+        playerState: () => playback,
+        playerPosition: () => 1,
+        currentTrack: { persistentID: () => first },
+        shuffleEnabled: () => false,
+        songRepeat: () => "all",
+        playlists: { whose: () => () => [{ tracks }] },
+      };
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) =>
+          Effect.gen(function* () {
+            const tail = args.slice(5);
+            if (tail[0] === "pause") {
+              yield* Deferred.succeed(pauseStarted, undefined);
+              yield* Deferred.await(releasePause);
+              playback = "paused";
+              return output({ stdout: `paused ${first} 1` });
+            }
+            if (tail.length === 4) {
+              const script = args[4]!;
+              const result: unknown = NodeVM.runInNewContext(
+                script.slice(script.indexOf("function run(")) + "; run(argv)",
+                { Application: () => music, argv: tail },
+              );
+              yield* Deferred.succeed(checkedAutomatic, undefined);
+              return output({ stdout: String(result) });
+            }
+            return output({ stdout: "ok:0" });
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: "5CA38D01224697B3", trackId: first, index: 0 });
+        session.emit(sampleLine({ state: "playing", position: 197, repeat: "all" }));
+        yield* Queue.take(received);
+        const cue = yield* player
+          .observeAgents(
+            {
+              requestIds: new Set(["request"]),
+              workingProjectIds: new Set(),
+              preexisting: new Set<string>(),
+            },
+            "pause",
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(pauseStarted);
+        session.emit(sampleLine({ state: "playing", position: 1, repeat: "all" }));
+        yield* Deferred.succeed(releasePause, undefined);
+        yield* Fiber.join(cue);
+        session.emit(sampleLine({ state: "playing", position: 1, repeat: "all" }));
+        yield* Deferred.await(checkedAutomatic);
+        assert.deepStrictEqual(played, []);
+        assert.strictEqual(playback, "paused");
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect("shares one watcher, gives late subscribers a snapshot, and stops with the last", () =>
     Effect.gen(function* () {
       const { sessions, runner } = yield* makeHarness();
