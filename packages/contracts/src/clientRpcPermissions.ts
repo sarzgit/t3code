@@ -81,6 +81,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.musicPlayPlaylist]: AuthOrchestrationOperateScope,
   [WS_METHODS.musicPlayTrack]: AuthOrchestrationOperateScope,
   [WS_METHODS.musicControl]: AuthOrchestrationOperateScope,
+  // Rewrites the host's listening history.
+  [WS_METHODS.musicImportHistory]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicClearHistory]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

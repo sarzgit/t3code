@@ -74,12 +74,13 @@ describe("RPC authorization scopes", () => {
     }
   });
 
-  it("lets thread readers see what Music plays, but only operators make the host play audio", () => {
+  it("lets thread readers see what Music plays, but only operators play audio or rewrite history", () => {
     for (const method of [
       WS_METHODS.subscribeMusicState,
       WS_METHODS.musicListPlaylists,
       WS_METHODS.musicGetArtwork,
       WS_METHODS.musicListTracks,
+      WS_METHODS.musicGetStats,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
     }
@@ -87,6 +88,8 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.musicPlayPlaylist,
       WS_METHODS.musicPlayTrack,
       WS_METHODS.musicControl,
+      WS_METHODS.musicImportHistory,
+      WS_METHODS.musicClearHistory,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }

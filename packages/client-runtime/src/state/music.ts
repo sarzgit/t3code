@@ -1,4 +1,6 @@
 import {
+  MUSIC_HISTORY_IMPORT_MAX_ROWS,
+  type MusicHistoryRow,
   type MusicPlayerState,
   type MusicPlaylist,
   type MusicPlaylistPreferences,
@@ -56,6 +58,15 @@ export function createMusicEnvironmentAtoms<R, E>(
       tag: WS_METHODS.musicGetStats,
       staleTimeMs: 0,
       idleTtlMs: 0,
+    }),
+    // Each chunk saves on its own and re-sending one changes nothing, so no shared lane.
+    importHistory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:import-history",
+      tag: WS_METHODS.musicImportHistory,
+    }),
+    clearHistory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:clear-history",
+      tag: WS_METHODS.musicClearHistory,
     }),
     playPlaylist: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:music:play-playlist",
@@ -170,4 +181,88 @@ export function withSeekAnchor(
     state: { ...received.state, positionSec: anchor.positionSec },
     receivedAtMs: anchor.atMs,
   };
+}
+
+/** Rows per import request: the server's limit, about 200 KB of JSON. */
+export const MUSIC_HISTORY_CHUNK_ROWS = MUSIC_HISTORY_IMPORT_MAX_ROWS;
+const MAX_TEXT = 500;
+const DAY_SECONDS = 86_400;
+const DATE_PLAYED = /^(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/;
+
+export type ParsedMusicHistory =
+  | { readonly _tag: "parsed"; readonly rows: ReadonlyArray<MusicHistoryRow> }
+  | { readonly _tag: "wrong-file" }
+  | { readonly _tag: "empty" };
+
+/** RFC 4180 records: quoted fields may hold commas, quotes ("") and line breaks. */
+function* csvRecords(text: string): Generator<Array<string>> {
+  let field = "";
+  let record: Array<string> = [];
+  let quoted = false;
+  for (let index = text.charCodeAt(0) === 0xfeff ? 1 : 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (quoted) {
+      if (char !== '"') field += char;
+      else if (text[index + 1] === '"') {
+        field += '"';
+        index++;
+      } else quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") {
+      record.push(field);
+      field = "";
+    } else if (char === "\n" || char === "\r") {
+      if (char === "\r" && text[index + 1] === "\n") index++;
+      record.push(field);
+      yield record;
+      field = "";
+      record = [];
+    } else field += char;
+  }
+  if (field !== "" || record.length > 0) {
+    record.push(field);
+    yield record;
+  }
+}
+
+/** Must match the server's song key so one song never spans two rows of a day. */
+const songKey = (name: string, artist: string) => {
+  const normalize = (value: string) => value.normalize("NFKC").trim().toLowerCase();
+  return `${normalize(artist)}\u0000${normalize(name)}`;
+};
+
+/**
+ * Reads Apple's "Apple Music - Play History Daily Tracks.csv" into one row per day and song.
+ * The export repeats a day and song (one row per device or source), so those add up here.
+ * "Track Description" is "Artist - Title"; one without the separator is all title.
+ */
+export function parseMusicHistoryCsv(text: string): ParsedMusicHistory {
+  const records = csvRecords(text);
+  const header = records.next();
+  if (header.done) return { _tag: "wrong-file" };
+  const columns = header.value.map((name) => name.trim());
+  const dateColumn = columns.indexOf("Date Played");
+  const durationColumn = columns.indexOf("Play Duration Milliseconds");
+  const descriptionColumn = columns.indexOf("Track Description");
+  if (dateColumn < 0 || durationColumn < 0 || descriptionColumn < 0) return { _tag: "wrong-file" };
+  const rows = new Map<string, MusicHistoryRow>();
+  for (const record of records) {
+    const date = DATE_PLAYED.exec(record[dateColumn]?.trim() ?? "");
+    const milliseconds = Number(record[durationColumn]);
+    const description = record[descriptionColumn]?.trim() ?? "";
+    if (date === null || !(milliseconds > 0) || description === "") continue;
+    const separator = description.indexOf(" - ");
+    const artist = separator < 0 ? "" : description.slice(0, separator).trim();
+    const name = separator < 0 ? description : description.slice(separator + 3).trim();
+    const day = `${date[1]}-${date[2]}-${date[3]}`;
+    const key = `${day}\u0000${songKey(name, artist)}`;
+    const seconds = (rows.get(key)?.seconds ?? 0) + milliseconds / 1000;
+    rows.set(key, {
+      day,
+      name: rows.get(key)?.name ?? name.slice(0, MAX_TEXT),
+      artist: rows.get(key)?.artist ?? artist.slice(0, MAX_TEXT),
+      seconds: Math.min(seconds, DAY_SECONDS),
+    });
+  }
+  return rows.size === 0 ? { _tag: "empty" } : { _tag: "parsed", rows: [...rows.values()] };
 }

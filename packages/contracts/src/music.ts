@@ -180,6 +180,8 @@ export const MusicStats = Schema.Struct({
   totalSec: Schema.Number,
   /** One entry per day in the range, oldest first, in the server's local time. */
   days: Schema.Array(Schema.Struct({ date: Schema.String, seconds: Schema.Number })),
+  /** Last day covered by imported Apple Music history; absent when none is imported. */
+  importedThrough: Schema.optionalKey(Schema.String),
   artists: Schema.Array(Schema.Struct({ name: MusicText, seconds: Schema.Number })),
   tracks: Schema.Array(
     Schema.Struct({ name: MusicText, artist: MusicText, seconds: Schema.Number }),
@@ -188,6 +190,38 @@ export const MusicStats = Schema.Struct({
   projects: Schema.Array(Schema.Struct({ projectId: ProjectId, seconds: Schema.Number })),
 });
 export type MusicStats = typeof MusicStats.Type;
+
+const MUSIC_HISTORY_DAY_PATTERN = /^20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+/** One song's listening on one day, summed from Apple's Play History Daily Tracks export. */
+const MusicHistoryDay = Schema.String.check(Schema.isPattern(MUSIC_HISTORY_DAY_PATTERN));
+
+export const MusicHistoryRow = Schema.Struct({
+  day: MusicHistoryDay,
+  name: MusicText,
+  artist: MusicText,
+  seconds: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 86_400 })),
+});
+export type MusicHistoryRow = typeof MusicHistoryRow.Type;
+
+export const MUSIC_HISTORY_IMPORT_MAX_ROWS = 2_000;
+
+/** A chunk of an import. Chunks are independent: re-sending one changes nothing. */
+export const MusicImportHistoryInput = Schema.Struct({
+  rows: Schema.Array(MusicHistoryRow).check(Schema.isMaxLength(MUSIC_HISTORY_IMPORT_MAX_ROWS)),
+  /**
+   * Sent with the last chunk only: the export's final day. Until it arrives the import does not
+   * replace library-synced listening, so a stopped import hides nothing.
+   */
+  coveredThrough: Schema.optionalKey(MusicHistoryDay),
+});
+export type MusicImportHistoryInput = typeof MusicImportHistoryInput.Type;
+
+export const MusicImportHistoryResult = Schema.Struct({
+  /** Last day covered by all imported history so far. */
+  importedThrough: Schema.NullOr(Schema.String),
+});
+export type MusicImportHistoryResult = typeof MusicImportHistoryResult.Type;
 
 export const MusicAgentCue = Schema.Literals(["off", "lower-volume", "pause"]);
 export type MusicAgentCue = typeof MusicAgentCue.Type;
@@ -201,6 +235,7 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
     "control",
     "artwork",
     "stats",
+    "import-history",
   ]),
   reason: Schema.Literals(["unsupported", "permission-denied", "not-found", "unavailable"]),
   cause: Schema.optional(Schema.Defect()),
@@ -216,7 +251,9 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
           ? "That song is no longer in this playlist."
           : "That playlist is no longer in your Music library.";
       case "unavailable":
-        return "The Music app did not respond. Try again.";
+        return this.operation === "import-history"
+          ? "Listening history could not be saved. Try again."
+          : "The Music app did not respond. Try again.";
     }
   }
 }

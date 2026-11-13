@@ -6,6 +6,7 @@ import {
   formatTrackTime,
   musicPositionAt,
   nextRepeatMode,
+  parseMusicHistoryCsv,
   withSeekAnchor,
 } from "./music.ts";
 
@@ -90,5 +91,54 @@ describe("player controls", () => {
     expect(musicPositionAt(anchored, 6_000)).toBe(91);
     const newer = { state: ready({ positionSec: 40 }), receivedAtMs: 7_000 };
     expect(withSeekAnchor(newer, anchor)).toBe(newer);
+  });
+});
+
+describe("parseMusicHistoryCsv", () => {
+  const HEADER =
+    "Country,Track Identifier,Media type,Date Played,Hours,Play Duration Milliseconds,End Reason Type,Source Type,Play Count,Skip Count,Ignore For Recommendations,Track Reference,Track Description";
+  const line = (date: string, ms: string, description: string) =>
+    `US,1001,AUDIO,${date},"18, 19",${ms},NATURAL_END_OF_TRACK,IPHONE,1,0,,1001,${description}`;
+
+  it("sums repeated rows for a day and song, and splits artist from title once", () => {
+    const csv = [
+      `\uFEFF${HEADER}`,
+      line("20261101", "120000", '"Brian Eno - 1/2"'),
+      line("20261101", "60000", '"brian eno - 1/2 "'),
+      line("20261102", "30000", '"Artist - Song - Live, ""Remastered"""'),
+      line("20261102", "45000", "Apple Music 1"),
+    ].join("\r\n");
+    expect(parseMusicHistoryCsv(csv)).toEqual({
+      _tag: "parsed",
+      rows: [
+        { day: "2026-11-01", name: "1/2", artist: "Brian Eno", seconds: 180 },
+        { day: "2026-11-02", name: 'Song - Live, "Remastered"', artist: "Artist", seconds: 30 },
+        { day: "2026-11-02", name: "Apple Music 1", artist: "", seconds: 45 },
+      ],
+    });
+  });
+
+  it("skips malformed rows and caps a day at 24 hours", () => {
+    const csv = [
+      HEADER,
+      line("2026-11-01", "1000", "A - B"),
+      line("19991231", "1000", "A - B"),
+      line("20261301", "1000", "A - B"),
+      line("20261101", "abc", "A - B"),
+      line("20261101", "0", "A - B"),
+      line("20261101", "1000", '""'),
+      line("20261101", "90000000", '"A - B"'),
+      "truncated,row",
+    ].join("\n");
+    expect(parseMusicHistoryCsv(csv)).toEqual({
+      _tag: "parsed",
+      rows: [{ day: "2026-11-01", name: "B", artist: "A", seconds: 86_400 }],
+    });
+  });
+
+  it("rejects other files and reports one with no listening", () => {
+    expect(parseMusicHistoryCsv("")._tag).toBe("wrong-file");
+    expect(parseMusicHistoryCsv("Song Name,Artist Name\nA,B")._tag).toBe("wrong-file");
+    expect(parseMusicHistoryCsv(`${HEADER}\n`)._tag).toBe("empty");
   });
 });

@@ -210,6 +210,8 @@ describe("command permissions", () => {
     WS_METHODS.musicPlayPlaylist,
     WS_METHODS.musicPlayTrack,
     WS_METHODS.musicControl,
+    WS_METHODS.musicImportHistory,
+    WS_METHODS.musicClearHistory,
   ])("uses the target grant for both availability and execution of %s", (method) =>
     Effect.scoped(
       Effect.gen(function* () {

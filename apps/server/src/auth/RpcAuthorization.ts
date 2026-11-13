@@ -220,6 +220,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.musicGetStats]: AuthOrchestrationReadScope,
   [WS_METHODS.musicPlayPlaylist]: AuthOrchestrationOperateScope,
   [WS_METHODS.musicControl]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicImportHistory]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicClearHistory]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribeServerConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,

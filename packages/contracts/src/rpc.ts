@@ -416,6 +416,8 @@ import {
   MusicArtworkInput,
   MusicControlInput,
   MusicError,
+  MusicImportHistoryInput,
+  MusicImportHistoryResult,
   MusicListTracksInput,
   MusicPlayerState,
   MusicPlaylists,
@@ -642,6 +644,8 @@ export const WS_METHODS = {
   musicControl: "music.control",
   musicGetArtwork: "music.getArtwork",
   musicGetStats: "music.getStats",
+  musicImportHistory: "music.importHistory",
+  musicClearHistory: "music.clearHistory",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
@@ -1847,6 +1851,17 @@ const WsMusicGetStatsRpc = Rpc.make(WS_METHODS.musicGetStats, {
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
 });
 
+const WsMusicImportHistoryRpc = Rpc.make(WS_METHODS.musicImportHistory, {
+  payload: MusicImportHistoryInput,
+  success: MusicImportHistoryResult,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicClearHistoryRpc = Rpc.make(WS_METHODS.musicClearHistory, {
+  payload: Schema.Struct({}),
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
@@ -2349,6 +2364,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsMusicControlRpc,
   WsMusicGetArtworkRpc,
   WsMusicGetStatsRpc,
+  WsMusicImportHistoryRpc,
+  WsMusicClearHistoryRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

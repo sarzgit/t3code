@@ -4,6 +4,8 @@ import {
   type MusicAgentCue,
   type MusicArtworkInput,
   type MusicControlInput,
+  type MusicImportHistoryInput,
+  type MusicImportHistoryResult,
   type MusicListTracksInput,
   type MusicPlayerState,
   type MusicPlaylists,
@@ -48,6 +50,10 @@ export class MusicPlayer extends Context.Service<
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
     readonly stats: (input: MusicStatsInput) => Effect.Effect<MusicStats, MusicError>;
+    readonly importHistory: (
+      input: MusicImportHistoryInput,
+    ) => Effect.Effect<MusicImportHistoryResult, MusicError>;
+    readonly clearHistory: Effect.Effect<void, MusicError>;
     /** Agent requests drive the cue; working projects attribute listening time. */
     readonly observeAgents: (activity: AgentActivity, cue: MusicAgentCue) => Effect.Effect<void>;
   }
@@ -107,7 +113,7 @@ function parseCueResult(result: string): CueApplied | null {
 // Sending Music an Apple event registers osascript as a foreground app, which puts a
 // second T3 Code icon in the Dock. Declaring no UI first keeps it background-only;
 // ARTWORK_SCRIPT does the same inside its run handler.
-const JXA_NO_DOCK_ICON = `ObjC.import("AppKit");
+export const JXA_NO_DOCK_ICON = `ObjC.import("AppKit");
 $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyProhibited);
 `;
 const WATCH_SCRIPT = `ObjC.import("Foundation");
@@ -1044,6 +1050,17 @@ const make = Effect.gen(function* () {
       if (!supported) return yield* new MusicError({ operation: "stats", reason: "unsupported" });
       return yield* listening.summary(input);
     }),
+    importHistory: Effect.fn("MusicPlayer.importHistory")(function* (
+      input: MusicImportHistoryInput,
+    ) {
+      if (!supported) {
+        return yield* new MusicError({ operation: "import-history", reason: "unsupported" });
+      }
+      return yield* listening.importHistory(input);
+    }),
+    clearHistory: supported
+      ? listening.clearHistory
+      : Effect.fail(new MusicError({ operation: "import-history", reason: "unsupported" })),
     observeAgents,
   });
 });

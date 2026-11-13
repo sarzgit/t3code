@@ -234,6 +234,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.musicListTracks]: "music",
   [WS_METHODS.musicPlayTrack]: "music",
   [WS_METHODS.musicGetStats]: "music",
+  [WS_METHODS.musicImportHistory]: "music",
+  [WS_METHODS.musicClearHistory]: "music",
   [WS_METHODS.subscribeServerConfig]: "server",
   [WS_METHODS.subscribeServerLifecycle]: "server",
   [WS_METHODS.subscribeAuthAccess]: "auth",

@@ -89,6 +89,7 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as MusicAgentWatch from "./music/MusicAgentWatch.ts";
 import * as MusicListeningStats from "./music/MusicListeningStats.ts";
+import * as MusicLibrarySync from "./music/MusicLibrarySync.ts";
 import * as MusicPlayer from "./music/MusicPlayer.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -512,7 +513,8 @@ const layerDevice = DeviceService.layer.pipe(
   Layer.provide(NetService.layer),
 );
 
-const layerMusic = MusicPlayer.layer.pipe(
+// One stats store for both, so the player and library scans never write over each other.
+const layerMusic = Layer.mergeAll(MusicPlayer.layer, MusicLibrarySync.layer).pipe(
   Layer.provide(ProcessRunner.layer),
   Layer.provide(MusicListeningStats.layer),
 );
