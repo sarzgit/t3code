@@ -57,8 +57,8 @@ export interface AgentActivity {
   /** Open approval and question requests across unarchived threads. */
   readonly requestIds: ReadonlySet<string>;
   readonly workingProjectIds: ReadonlySet<string>;
-  /** The first report after startup: its requests predate this run and never trigger the cue. */
-  readonly initial: boolean;
+  /** Requests open before the server started watching; they never trigger the cue. */
+  readonly preexisting: ReadonlySet<string>;
 }
 
 type CueApplied =
@@ -77,9 +77,9 @@ const INITIAL_CUE_STATE: CueState = { known: new Set(), triggers: new Set(), app
 function planCue(
   state: CueState,
   requestIds: ReadonlySet<string>,
-  initial: boolean,
+  preexisting: ReadonlySet<string>,
 ): { readonly next: CueState; readonly step: "apply" | "restore" | null } {
-  const fresh = initial ? [] : [...requestIds].filter((id) => !state.known.has(id));
+  const fresh = [...requestIds].filter((id) => !state.known.has(id) && !preexisting.has(id));
   const triggers = new Set([...state.triggers].filter((id) => requestIds.has(id)));
   for (const id of fresh) triggers.add(id);
   const step =
@@ -258,7 +258,8 @@ const CUE_SCRIPT = `function run(argv) {
       if (
         Music.playerState() === "paused" &&
         Music.currentTrack.persistentID() === argv[1] &&
-        Math.abs(Music.playerPosition() - Number(argv[2])) < 2
+        // Pausing and reading back differ by hundredths; a second of play means the user did it.
+        Math.abs(Music.playerPosition() - Number(argv[2])) < 0.5
       ) Music.play();
       return "ok";
   }
@@ -748,7 +749,7 @@ const make = Effect.gen(function* () {
         const { next, step } = planCue(
           yield* Ref.get(cueState),
           activity.requestIds,
-          activity.initial,
+          activity.preexisting,
         );
         let applied = next.applied;
         if (step === "apply" && cue !== "off") {

@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { ProjectId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { summarizeActivity, threadActivity } from "./MusicAgentWatch.ts";
+import { mergeReports, summarizeActivity, threadActivity } from "./MusicAgentWatch.ts";
 
 const ROOT = ThreadId.make("root");
 const SUBAGENT = {
@@ -22,10 +22,11 @@ const thread = (overrides: Partial<Parameters<typeof threadActivity>[0]> = {}) =
     ...overrides,
   }) satisfies Parameters<typeof threadActivity>[0];
 
-const request = (kind: "user_input" | "command" | "auth_refresh", id: string = kind) => ({
-  id: RuntimeRequestId.make(id),
-  kind,
-});
+const request = (
+  kind: "user_input" | "command" | "auth_refresh",
+  id: string = kind,
+  createdAtMs = 0,
+) => ({ id: RuntimeRequestId.make(id), kind, createdAt: DateTime.makeUnsafe(createdAtMs) });
 
 describe("threadActivity", () => {
   it("counts every open request the user must answer", () => {
@@ -60,9 +61,25 @@ describe("threadActivity", () => {
           [],
         ),
       ].flatMap((entry) => entry ?? []),
-      false,
+      null,
     );
     assert.deepStrictEqual([...activity.requestIds], ["command", "user_input", "child-approval"]);
     assert.deepStrictEqual([...activity.workingProjectIds], ["project-1", "project-3"]);
+  });
+});
+
+describe("summarizeActivity", () => {
+  it("treats only requests created before the watch began as already open", () => {
+    const watched = threadActivity(thread(), [
+      request("command", "before", 1_000),
+      request("command", "during-startup", 2_500),
+    ]);
+    const startup = summarizeActivity([watched!], 2_000);
+    assert.deepStrictEqual([...startup.preexisting], ["before"]);
+
+    // A later report replacing the startup one before the cue ran keeps its baseline.
+    const merged = mergeReports([startup, summarizeActivity([watched!], null)]);
+    assert.deepStrictEqual([...merged.preexisting], ["before"]);
+    assert.deepStrictEqual([...merged.requestIds], ["before", "during-startup"]);
   });
 });

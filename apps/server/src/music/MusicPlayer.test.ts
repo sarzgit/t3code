@@ -461,17 +461,20 @@ describe("MusicPlayer", () => {
             output({ stdout: args.includes("lower-volume") ? "lowered 80 24\n" : "ok\n" }),
           ),
       });
-      const activity = (requestIds: ReadonlyArray<string>, initial = false) => ({
+      const activity = (
+        requestIds: ReadonlyArray<string>,
+        preexisting: ReadonlyArray<string> = [],
+      ) => ({
         requestIds: new Set(requestIds),
         workingProjectIds: new Set<string>(),
-        initial,
+        preexisting: new Set(preexisting),
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
         const cueArgs = Effect.map(Ref.get(calls), (all) => all.map((call) => call.slice(5)));
 
         // A request already open at startup never lowers the volume.
-        yield* player.observeAgents(activity(["stale"], true), "lower-volume");
+        yield* player.observeAgents(activity(["stale"], ["stale"]), "lower-volume");
         yield* player.observeAgents(activity(["stale", "new"]), "lower-volume");
         // A second request while lowered does not lower again.
         yield* player.observeAgents(activity(["stale", "new", "other"]), "lower-volume");
@@ -499,7 +502,11 @@ describe("MusicPlayer", () => {
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
         yield* player.observeAgents(
-          { requestIds: new Set(["new"]), workingProjectIds: new Set(), initial: false },
+          {
+            requestIds: new Set(["new"]),
+            workingProjectIds: new Set(),
+            preexisting: new Set<string>(),
+          },
           "pause",
         );
       }).pipe(providePlayer(runner), Effect.scoped);
@@ -519,7 +526,7 @@ describe("MusicPlayer", () => {
       const working = (projectIds: ReadonlyArray<string>) => ({
         requestIds: new Set<string>(),
         workingProjectIds: new Set(projectIds),
-        initial: false,
+        preexisting: new Set<string>(),
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
@@ -539,7 +546,11 @@ describe("MusicPlayer", () => {
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
         yield* player.observeAgents(
-          { requestIds: new Set(), workingProjectIds: new Set(["project-1"]), initial: true },
+          {
+            requestIds: new Set(),
+            workingProjectIds: new Set(["project-1"]),
+            preexisting: new Set<string>(),
+          },
           "off",
         );
         const { received } = yield* subscribe(player);
