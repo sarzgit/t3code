@@ -55,7 +55,7 @@ When your T3 Code server runs on a Mac, the bottom of the sidebar shows what the
 playing, with a seek bar, shuffle, previous, play/pause, next, repeat, and Music's volume. Click the
 song to open your library playlists; click a playlist to see its songs, search them, and start one,
 or use **Play** and **Shuffle** for the whole playlist. The command palette also has
-**Music: Play/Pause**, **Next track**, and **Previous track**, bound by default to ⌘⌥P, ⌘⌥. and ⌘⌥,
+**Music: Play/Pause**, **Next track**, and **Previous track**, bound by default to ⌘⌥/, ⌘⌥. and ⌘⌥,
 (Ctrl+Alt elsewhere); change them under **Settings → Keybindings**. The heart beside the song
 favorites it in Music. Audio plays on the Mac running the server, even when you control it from
 another device.

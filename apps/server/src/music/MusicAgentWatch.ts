@@ -1,4 +1,9 @@
-import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
+import {
+  isProviderNativeSubagentThread,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2RuntimeRequest,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -14,23 +19,39 @@ import { type AgentActivity, MusicPlayer } from "./MusicPlayer.ts";
 
 interface ThreadActivity {
   readonly projectId: string;
-  readonly requestId: string | null;
+  readonly requestIds: ReadonlyArray<string>;
   readonly working: boolean;
 }
 
-/** What one thread contributes to the music cue and listening stats. */
+type ActivityThread = Pick<
+  AgentAwarenessThread,
+  "projectId" | "archivedAt" | "activityRunStatus" | "status" | "lineage" | "creationSource"
+>;
+
+/**
+ * What one thread contributes to the music cue and listening stats. `pending` is every open
+ * request on the thread; the shell itself shows only one.
+ */
 export function threadActivity(
-  thread: Pick<
-    AgentAwarenessThread,
-    "projectId" | "archivedAt" | "pendingRuntimeRequest" | "activityRunStatus" | "status"
-  >,
+  thread: ActivityThread,
+  pending: ReadonlyArray<Pick<OrchestrationV2RuntimeRequest, "id" | "kind">>,
 ): ThreadActivity | null {
   if (thread.archivedAt !== null) return null;
-  const request = thread.pendingRuntimeRequest;
   const runStatus = thread.activityRunStatus ?? thread.status;
+  const isSubagent = thread.lineage.relationshipToParent === "subagent";
+  // The coordinating agent answers a subagent's questions; only its approvals reach the user,
+  // and a provider-native subagent asks on its parent instead.
+  const subagentAsksUser =
+    !isProviderNativeSubagentThread(thread) && thread.activityRunStatus != null;
   return {
     projectId: thread.projectId,
-    requestId: request !== null && request.kind !== "auth_refresh" ? request.id : null,
+    requestIds: pending
+      .filter(
+        (request) =>
+          request.kind !== "auth_refresh" &&
+          (!isSubagent || (subagentAsksUser && request.kind !== "user_input")),
+      )
+      .map((request) => request.id),
     working:
       runStatus === "preparing" ||
       runStatus === "starting" ||
@@ -46,7 +67,7 @@ export function summarizeActivity(
   const requestIds = new Set<string>();
   const workingProjectIds = new Set<string>();
   for (const thread of threads) {
-    if (thread.requestId !== null) requestIds.add(thread.requestId);
+    for (const id of thread.requestIds) requestIds.add(id);
     if (thread.working) workingProjectIds.add(thread.projectId);
   }
   return { requestIds, workingProjectIds, initial };
@@ -78,6 +99,18 @@ const make = Effect.gen(function* () {
   const player = yield* MusicPlayer;
   const threads = new Map<string, ThreadActivity>();
 
+  const track = Effect.fnUntraced(function* (thread: AgentAwarenessThread) {
+    const pending =
+      thread.pendingRuntimeRequest === null
+        ? []
+        : (yield* engine.getThreadRecords(thread.id, ["runtimeRequests"], {
+            runtimeRequestStatuses: ["pending"],
+          })).runtimeRequests.filter((request) => request.status === "pending");
+    const activity = threadActivity(thread, pending);
+    if (activity === null) threads.delete(thread.id);
+    else threads.set(thread.id, activity);
+  });
+
   const report = Effect.fnUntraced(function* (initial: boolean) {
     const cue = yield* settings.getSettings.pipe(
       Effect.map((current) => current.musicAgentCue),
@@ -86,24 +119,24 @@ const make = Effect.gen(function* () {
     yield* player.observeAgents(summarizeActivity(threads.values(), initial), cue);
   });
 
-  // Per event: one thread's shell, then the summary across all of them.
-  const refresh = Effect.fnUntraced(function* (event: OrchestrationV2DomainEvent) {
-    const { threads: rows } = yield* engine.getAgentAwarenessSnapshot(event.threadId);
-    const activity = rows[0] === undefined ? null : threadActivity(rows[0]);
-    if (activity === null) threads.delete(event.threadId);
-    else threads.set(event.threadId, activity);
+  const refresh = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const { threads: rows } = yield* engine.getAgentAwarenessSnapshot(threadId);
+    if (rows[0] === undefined) threads.delete(threadId);
+    else yield* track(rows[0]);
     yield* report(false);
   });
 
   const run = Effect.gen(function* () {
     const snapshot = yield* engine.getAgentAwarenessSnapshot();
-    for (const thread of snapshot.threads) {
-      const activity = threadActivity(thread);
-      if (activity !== null) threads.set(thread.id, activity);
-    }
+    yield* Effect.forEach(snapshot.threads, track, { discard: true });
     yield* report(true);
-    yield* Stream.runForEach(Stream.filter(engine.streamDomainEvents, isActivityEvent), (event) =>
-      refresh(event).pipe(
+    // From the snapshot's sequence, so nothing committed after it was read is missed.
+    const events = engine.streamStoredEventsFrom({ afterSequence: snapshot.snapshotSequence }).pipe(
+      Stream.map((stored) => stored.event),
+      Stream.filter(isActivityEvent),
+    );
+    yield* Stream.runForEach(events, (event) =>
+      refresh(event.threadId).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("music agent watch refresh failed", {
             threadId: event.threadId,

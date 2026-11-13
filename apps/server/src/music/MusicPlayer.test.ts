@@ -492,7 +492,9 @@ describe("MusicPlayer", () => {
     Effect.gen(function* () {
       const { calls, runner } = yield* makeHarness({
         respond: (args) =>
-          Effect.succeed(output({ stdout: args.includes("pause") ? "paused\n" : "ok\n" })),
+          Effect.succeed(
+            output({ stdout: args.includes("pause") ? "paused 3BA40D4A07B97011 61.5\n" : "ok\n" }),
+          ),
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
@@ -503,8 +505,31 @@ describe("MusicPlayer", () => {
       }).pipe(providePlayer(runner), Effect.scoped);
       assert.deepStrictEqual(
         (yield* Ref.get(calls)).map((call) => call.slice(5)),
-        [["pause", "0.3"], ["resume"]],
+        [
+          ["pause", "0.3"],
+          ["resume", "3BA40D4A07B97011", "61.5"],
+        ],
       );
+    }),
+  );
+
+  it.effect("samples Music while an agent works, with no client watching", () =>
+    Effect.gen(function* () {
+      const { sessions, runner } = yield* makeHarness();
+      const working = (projectIds: ReadonlyArray<string>) => ({
+        requestIds: new Set<string>(),
+        workingProjectIds: new Set(projectIds),
+        initial: false,
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        yield* player.observeAgents(working(["project-1"]), "off");
+        const session = yield* Queue.take(sessions);
+        yield* player.observeAgents(working(["project-1", "project-2"]), "off");
+        assert.strictEqual(yield* Queue.size(sessions), 0);
+        yield* player.observeAgents(working([]), "off");
+        yield* Deferred.await(session.interrupted);
+      }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
 

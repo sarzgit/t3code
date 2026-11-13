@@ -1,41 +1,68 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ProjectId, RuntimeRequestId } from "@t3tools/contracts";
+import { ProjectId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import { summarizeActivity, threadActivity } from "./MusicAgentWatch.ts";
 
-const thread = (overrides: Partial<Parameters<typeof threadActivity>[0]> = {}) => ({
-  projectId: ProjectId.make("project-1"),
-  archivedAt: null,
-  pendingRuntimeRequest: null,
-  activityRunStatus: null,
-  status: "completed" as const,
-  ...overrides,
-});
+const ROOT = ThreadId.make("root");
+const SUBAGENT = {
+  parentThreadId: ROOT,
+  relationshipToParent: "subagent" as const,
+  rootThreadId: ROOT,
+};
 
-const request = (kind: "user_input" | "command" | "auth_refresh") => ({
-  id: RuntimeRequestId.make(`request-${kind}`),
+const thread = (overrides: Partial<Parameters<typeof threadActivity>[0]> = {}) =>
+  ({
+    projectId: ProjectId.make("project-1"),
+    archivedAt: null,
+    activityRunStatus: null,
+    status: "completed",
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: ROOT },
+    creationSource: "web",
+    ...overrides,
+  }) satisfies Parameters<typeof threadActivity>[0];
+
+const request = (kind: "user_input" | "command" | "auth_refresh", id: string = kind) => ({
+  id: RuntimeRequestId.make(id),
   kind,
-  createdAt: DateTime.makeUnsafe(0),
 });
 
 describe("threadActivity", () => {
-  it("counts open approvals and questions, skips sign-in refreshes and archived threads", () => {
+  it("counts every open request the user must answer", () => {
     const activity = summarizeActivity(
       [
-        thread({ pendingRuntimeRequest: request("command"), status: "waiting" }),
-        thread({ pendingRuntimeRequest: request("user_input") }),
-        thread({ pendingRuntimeRequest: request("auth_refresh") }),
-        thread({
-          projectId: ProjectId.make("project-2"),
-          activityRunStatus: "running",
-          archivedAt: DateTime.makeUnsafe(0),
-        }),
-        thread({ projectId: ProjectId.make("project-3"), activityRunStatus: "starting" }),
-      ].flatMap((entry) => threadActivity(entry) ?? []),
+        // Two open requests on one thread both count, though its shell shows only one.
+        threadActivity(thread({ status: "waiting" }), [
+          request("command"),
+          request("user_input"),
+          request("auth_refresh"),
+        ]),
+        // The coordinating agent answers a subagent's question; its approval goes to the user.
+        threadActivity(thread({ lineage: SUBAGENT, activityRunStatus: "waiting" }), [
+          request("user_input", "child-question"),
+          request("command", "child-approval"),
+        ]),
+        // A provider-native subagent asks on its parent.
+        threadActivity(
+          thread({ lineage: SUBAGENT, activityRunStatus: "waiting", creationSource: "provider" }),
+          [request("command", "native-approval")],
+        ),
+        threadActivity(
+          thread({
+            projectId: ProjectId.make("project-2"),
+            activityRunStatus: "running",
+            archivedAt: DateTime.makeUnsafe(0),
+          }),
+          [request("command", "archived")],
+        ),
+        threadActivity(
+          thread({ projectId: ProjectId.make("project-3"), activityRunStatus: "starting" }),
+          [],
+        ),
+      ].flatMap((entry) => entry ?? []),
       false,
     );
-    assert.deepStrictEqual([...activity.requestIds], ["request-command", "request-user_input"]);
+    assert.deepStrictEqual([...activity.requestIds], ["command", "user_input", "child-approval"]);
     assert.deepStrictEqual([...activity.workingProjectIds], ["project-1", "project-3"]);
   });
 });

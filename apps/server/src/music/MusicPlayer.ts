@@ -63,7 +63,7 @@ export interface AgentActivity {
 
 type CueApplied =
   | { readonly kind: "lower-volume"; readonly from: number; readonly to: number }
-  | { readonly kind: "pause" };
+  | { readonly kind: "pause"; readonly trackId: string; readonly positionSec: number };
 
 interface CueState {
   readonly known: ReadonlySet<string>;
@@ -92,7 +92,10 @@ function planCue(
 }
 
 function parseCueResult(result: string): CueApplied | null {
-  if (result === "paused") return { kind: "pause" };
+  const paused = /^paused ([0-9A-F]{16}) (\d+(?:\.\d+)?)$/.exec(result);
+  if (paused !== null) {
+    return { kind: "pause", trackId: paused[1]!, positionSec: Number(paused[2]) };
+  }
   const lowered = /^lowered (\d+) (\d+)$/.exec(result);
   return lowered === null
     ? null
@@ -241,16 +244,22 @@ const CUE_SCRIPT = `function run(argv) {
       Music.soundVolume = to;
       return "lowered " + from + " " + Music.soundVolume();
     }
-    case "pause":
+    case "pause": {
       if (Music.playerState() !== "playing") return "none";
       Music.pause();
-      return "paused";
+      return "paused " + Music.currentTrack.persistentID() + " " + Music.playerPosition();
+    }
     case "restore-volume":
       // A volume the user changed meanwhile stays.
-      if (Math.abs(Music.soundVolume() - Number(argv[2])) <= 1) Music.soundVolume = Number(argv[1]);
+      if (Music.soundVolume() === Number(argv[2])) Music.soundVolume = Number(argv[1]);
       return "ok";
     case "resume":
-      if (Music.playerState() === "paused") Music.play();
+      // Only the song the cue paused, where it paused: anything else is the user's doing.
+      if (
+        Music.playerState() === "paused" &&
+        Music.currentTrack.persistentID() === argv[1] &&
+        Math.abs(Music.playerPosition() - Number(argv[2])) < 2
+      ) Music.play();
       return "ok";
   }
   return "none";
@@ -462,6 +471,7 @@ const make = Effect.gen(function* () {
   const workingProjectIds = yield* Ref.make<ReadonlySet<string>>(new Set());
   const cueState = yield* Ref.make<CueState>(INITIAL_CUE_STATE);
   const cueLock = yield* Semaphore.make(1);
+  const samplingForAgents = yield* Ref.make(false);
 
   // Credits the time since the previous sample to the song that was playing then.
   const creditSample = Effect.fnUntraced(function* (state: MusicPlayerState, now: number) {
@@ -715,7 +725,7 @@ const make = Effect.gen(function* () {
       "JavaScript",
       CUE_SCRIPT,
       applied.kind === "pause"
-        ? ["resume"]
+        ? ["resume", applied.trackId, String(applied.positionSec)]
         : ["restore-volume", String(applied.from), String(applied.to)],
     );
   });
@@ -726,6 +736,13 @@ const make = Effect.gen(function* () {
   ) {
     yield* Ref.set(workingProjectIds, activity.workingProjectIds);
     if (!supported) return;
+    // While agents work, sample Music for stats even with no client watching.
+    const sampling = activity.workingProjectIds.size > 0;
+    if (sampling !== (yield* Ref.getAndSet(samplingForAgents, sampling))) {
+      yield* sampling ? retain : release;
+    }
+    // Uninterruptible (scripts are bounded by SCRIPT_TIMEOUT), so a shutdown mid-change still
+    // records what to restore.
     yield* cueLock.withPermits(1)(
       Effect.gen(function* () {
         const { next, step } = planCue(
@@ -741,7 +758,7 @@ const make = Effect.gen(function* () {
           applied = null;
         }
         yield* Ref.set(cueState, { ...next, applied });
-      }),
+      }).pipe(Effect.uninterruptible),
     );
   });
 
