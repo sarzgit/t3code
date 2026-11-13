@@ -155,7 +155,7 @@ const CONTROL_SCRIPT = `function run(argv) {
     case "shuffle-off": Music.shuffleEnabled = false; break;
     case "seek": Music.playerPosition = Number(argv[1]); break;
     case "volume": Music.soundVolume = Number(argv[1]); break;
-    // Music ignores repeat changes while no song is loaded.
+    // Music ignores repeat changes unless a song is playing.
     case "repeat": Music.songRepeat = argv[1]; break;
   }
   return "ok";

@@ -112,8 +112,7 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
     const clear = () =>
       setPending((current) => {
         if (key === undefined || current[key] !== optimistic) return current;
-        const { [key]: _cleared, ...rest } = current;
-        return rest;
+        return { ...current, [key]: undefined };
       });
     void runControl({ environmentId, input }).then((result) => {
       if (result._tag !== "Success") clear();
@@ -169,7 +168,10 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
             aria-label="Shuffle"
             aria-pressed={shuffle}
             data-pressed={shuffle ? "" : undefined}
-            disabled={!controllable || ready === null}
+            // Music ignores shuffle for Autoplay songs, which belong to no playlist.
+            disabled={
+              !controllable || ready === null || (track !== null && ready.playlistId === null)
+            }
             onClick={() => send({ _tag: "set-shuffle", enabled: !shuffle }, "shuffle", !shuffle)}
           >
             <ShuffleIcon />
@@ -210,11 +212,11 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
             <Button
               variant="ghost-muted"
               size="icon-xs"
-              // Music ignores repeat changes until a song is loaded.
               aria-label={`Repeat: ${repeat === "one" ? "this song" : repeat === "all" ? "all" : "off"}`}
               aria-pressed={repeat !== "off"}
               data-pressed={repeat !== "off" ? "" : undefined}
-              disabled={!hasTrack}
+              // Music ignores repeat changes unless a song is playing.
+              disabled={!hasTrack || playback !== "playing"}
               onClick={() => {
                 const mode = nextRepeatMode(repeat);
                 send({ _tag: "set-repeat", mode }, "repeat", mode);

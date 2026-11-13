@@ -268,6 +268,8 @@ function PlaylistSongs({
             data={songs}
             dataKey={search}
             initialScrollOffset={0}
+            // Rows only rerender for new data; the playing mark and permission live outside it.
+            extraData={`${playingTrackId}:${playable}`}
             keyExtractor={(song) => `${song.id}:${song.index}`}
             renderItem={({ item }) => <div role="listitem">{renderSong(item)}</div>}
             estimatedItemSize={SONG_ROW_HEIGHT}
