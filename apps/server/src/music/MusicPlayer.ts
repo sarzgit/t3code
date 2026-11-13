@@ -40,6 +40,13 @@ export class MusicPlayer extends Context.Service<
 >()("t3/music/MusicPlayer") {}
 
 // Scripts are fixed text. Anything from a request reaches them only as osascript argv.
+
+// Sending Music an Apple event registers osascript as a foreground app, which puts a
+// second T3 Code icon in the Dock. Declaring no UI first keeps it background-only;
+// ARTWORK_SCRIPT does the same inside its run handler.
+const JXA_NO_DOCK_ICON = `ObjC.import("AppKit");
+$.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyProhibited);
+`;
 const WATCH_SCRIPT = `ObjC.import("Foundation");
 function emit(value) {
   $.NSFileHandle.fileHandleWithStandardOutput.writeData(
@@ -110,7 +117,10 @@ const CONTROL_SCRIPT = `function run(argv) {
 }`;
 
 // AppleScript, because JXA cannot write artwork raw data to a file.
-const ARTWORK_SCRIPT = `on run argv
+const ARTWORK_SCRIPT = `use framework "AppKit"
+use scripting additions
+on run argv
+  current application's NSApplication's sharedApplication()'s setActivationPolicy:(current application's NSApplicationActivationPolicyProhibited)
   set wantedId to item 1 of argv
   set outPath to item 2 of argv
   if application "Music" is not running then return "none"
@@ -303,7 +313,7 @@ const make = Effect.gen(function* () {
     const exitState = yield* runner
       .run({
         command: "osascript",
-        args: ["-l", "JavaScript", "-e", WATCH_SCRIPT, WATCH_INTERVAL_SECONDS],
+        args: ["-l", "JavaScript", "-e", JXA_NO_DOCK_ICON + WATCH_SCRIPT, WATCH_INTERVAL_SECONDS],
         timeout: Duration.infinity,
         maxOutputBytes: 64 * 1024,
         outputMode: "truncate",
@@ -369,7 +379,13 @@ const make = Effect.gen(function* () {
     const output = yield* runner
       .run({
         command: "osascript",
-        args: ["-l", language, "-e", script, ...args],
+        args: [
+          "-l",
+          language,
+          "-e",
+          language === "JavaScript" ? JXA_NO_DOCK_ICON + script : script,
+          ...args,
+        ],
         timeout: SCRIPT_TIMEOUT,
         maxOutputBytes: 1024 * 1024,
       })
