@@ -1,8 +1,9 @@
 import {
   isProviderNativeSubagentThread,
+  type MusicAgentCue,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2PendingRuntimeRequestSummary,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
@@ -12,7 +13,6 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
-import * as Ref from "effect/Ref";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -27,23 +27,30 @@ type PendingRequest = Pick<
   "id" | "kind" | "createdAt"
 >;
 
+export type WatchedThread = Pick<
+  AgentAwarenessThread,
+  | "id"
+  | "projectId"
+  | "archivedAt"
+  | "activityRunStatus"
+  | "status"
+  | "lineage"
+  | "creationSource"
+  | "pendingRuntimeRequest"
+>;
+
 interface ThreadActivity {
   readonly projectId: string;
   readonly requests: ReadonlyArray<{ readonly id: string; readonly createdAtMs: number }>;
   readonly working: boolean;
 }
 
-type ActivityThread = Pick<
-  AgentAwarenessThread,
-  "projectId" | "archivedAt" | "activityRunStatus" | "status" | "lineage" | "creationSource"
->;
-
 /**
  * What one thread contributes to the music cue and listening stats. `pending` is every open
  * request on the thread; the shell itself shows only one.
  */
 export function threadActivity(
-  thread: ActivityThread,
+  thread: Omit<WatchedThread, "id" | "pendingRuntimeRequest">,
   pending: ReadonlyArray<PendingRequest>,
 ): ThreadActivity | null {
   if (thread.archivedAt !== null) return null;
@@ -73,10 +80,10 @@ export function threadActivity(
   };
 }
 
-/** `openSinceMs`: requests created by then predate the watch and never trigger the cue. */
+/** Requests created by `openSinceMs` predate the watch and never trigger the cue. */
 export function summarizeActivity(
   threads: Iterable<ThreadActivity>,
-  openSinceMs: number | null,
+  openSinceMs: number,
 ): AgentActivity {
   const requestIds = new Set<string>();
   const preexisting = new Set<string>();
@@ -84,20 +91,105 @@ export function summarizeActivity(
   for (const thread of threads) {
     for (const request of thread.requests) {
       requestIds.add(request.id);
-      if (openSinceMs !== null && request.createdAtMs <= openSinceMs) preexisting.add(request.id);
+      if (request.createdAtMs <= openSinceMs) preexisting.add(request.id);
     }
     if (thread.working) workingProjectIds.add(thread.projectId);
   }
   return { requestIds, workingProjectIds, preexisting };
 }
 
-/** Folds reports queued while the cue worked; the newest state wins. */
-export function mergeReports(reports: ReadonlyArray<AgentActivity>): AgentActivity {
-  const latest = reports.at(-1)!;
-  const preexisting = new Set<string>();
-  for (const report of reports) for (const id of report.preexisting) preexisting.add(id);
-  return { ...latest, preexisting };
+/** What the watch reads from orchestration; narrow so tests can drive it. */
+export interface AgentSource {
+  /** Listed, unarchived threads. */
+  readonly listThreads: Effect.Effect<ReadonlyArray<WatchedThread>>;
+  /** One thread, archived included; null once deleted. */
+  readonly readThread: (threadId: string) => Effect.Effect<WatchedThread | null>;
+  readonly pendingRequests: (threadId: string) => Effect.Effect<ReadonlyArray<PendingRequest>>;
+  /** Ids of threads whose requests, runs or archive state changed, from when it starts. */
+  readonly changes: Stream.Stream<string>;
 }
+
+type Work = { readonly _tag: "thread"; readonly id: string } | { readonly _tag: "reconcile" };
+
+const RESUBSCRIBE_DELAY = "1 second";
+const STREAM_SETTLE_DELAY = "2 seconds";
+
+/**
+ * One worker reads, updates and reports in order, so a stale read never overwrites a newer
+ * one. The event stream only queues thread ids, so slow Music scripts never hold it up.
+ */
+export const runAgentWatch = Effect.fn("MusicAgentWatch.run")(function* (input: {
+  readonly source: AgentSource;
+  readonly observe: (activity: AgentActivity) => Effect.Effect<void>;
+}) {
+  const { source, observe } = input;
+  // Fixed for the process: requests older than the watch never cue, however late they show up.
+  const openSinceMs = yield* Clock.currentTimeMillis;
+  const threads = new Map<string, ThreadActivity>();
+  const work = yield* Queue.unbounded<Work>();
+
+  const track = Effect.fnUntraced(function* (thread: WatchedThread) {
+    const shellRequest = thread.pendingRuntimeRequest;
+    const records = shellRequest === null ? [] : yield* source.pendingRequests(thread.id);
+    // The shell's request may be a secret or link card, which has no runtime request row.
+    const pending =
+      shellRequest !== null && !records.some((request) => request.id === shellRequest.id)
+        ? [...records, shellRequest]
+        : records;
+    const activity = threadActivity(thread, pending);
+    if (activity === null) threads.delete(thread.id);
+    else threads.set(thread.id, activity);
+  });
+
+  const refresh = Effect.fnUntraced(function* (threadId: string) {
+    const thread = yield* source.readThread(threadId);
+    if (thread === null) threads.delete(threadId);
+    else yield* track(thread);
+  });
+
+  const processBatch = Effect.fnUntraced(function* (batch: ReadonlyArray<Work>) {
+    const ids = new Set<string>();
+    if (batch.some((item) => item._tag === "reconcile")) {
+      const listed = yield* source.listThreads;
+      yield* Effect.forEach(listed, track, { discard: true });
+      const listedIds = new Set<string>(listed.map((thread) => thread.id));
+      // Tracked threads the listing leaves out: subagents, or ones archived or deleted since.
+      for (const id of threads.keys()) if (!listedIds.has(id)) ids.add(id);
+    }
+    for (const item of batch) if (item._tag === "thread") ids.add(item.id);
+    yield* Effect.forEach(ids, refresh, { discard: true });
+    yield* observe(summarizeActivity(threads.values(), openSinceMs));
+  });
+
+  const worker = Effect.forever(
+    Queue.takeAll(work).pipe(
+      Effect.flatMap(processBatch),
+      Effect.catchCause((cause) => Effect.logWarning("music agent watch batch failed", { cause })),
+    ),
+  );
+
+  const watchOnce = Effect.gen(function* () {
+    const consumer = yield* Effect.forkScoped(
+      Stream.runForEach(source.changes, (id) => Queue.offer(work, { _tag: "thread", id })),
+    );
+    yield* Queue.offer(work, { _tag: "reconcile" });
+    // The stream starts from the latest event when it first runs, which can land after the
+    // first listing. One more pass covers that gap.
+    yield* Effect.sleep(STREAM_SETTLE_DELAY);
+    yield* Queue.offer(work, { _tag: "reconcile" });
+    yield* Fiber.join(consumer);
+  }).pipe(Effect.scoped);
+
+  // A stream that ends or fails resubscribes and reconciles.
+  const watchLoop = Effect.forever(
+    watchOnce.pipe(
+      Effect.catchCause((cause) => Effect.logWarning("music agent watch restarting", { cause })),
+      Effect.andThen(Effect.sleep(RESUBSCRIBE_DELAY)),
+    ),
+  );
+
+  yield* Effect.all([worker, watchLoop], { concurrency: 2, discard: true });
+});
 
 const isActivityEvent = (event: OrchestrationV2DomainEvent) => {
   switch (event.type) {
@@ -116,9 +208,6 @@ const isActivityEvent = (event: OrchestrationV2DomainEvent) => {
   }
 };
 
-const RESUBSCRIBE_DELAY = "1 second";
-const STREAM_SETTLE_DELAY = "2 seconds";
-
 export class MusicAgentWatch extends Context.Service<
   MusicAgentWatch,
   { readonly start: () => Effect.Effect<void, never, Scope.Scope> }
@@ -129,92 +218,51 @@ const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const settings = yield* ServerSettings.ServerSettingsService;
   const player = yield* MusicPlayer;
-  const threads = new Map<string, ThreadActivity>();
-  // The cue runs Music scripts; a queue keeps them from holding up the event stream.
-  const reports = yield* Queue.unbounded<AgentActivity>();
-  const watchedOnce = yield* Ref.make(false);
 
-  const track = Effect.fnUntraced(function* (thread: AgentAwarenessThread) {
-    const records =
-      thread.pendingRuntimeRequest === null
-        ? []
-        : (yield* engine.getThreadRecords(thread.id, ["runtimeRequests"], {
-            runtimeRequestStatuses: ["pending"],
-          })).runtimeRequests.filter((request) => request.status === "pending");
-    // The shell's request may be a secret or link card, which has no runtime request row.
-    const shellRequest = thread.pendingRuntimeRequest;
-    const pending: ReadonlyArray<PendingRequest> =
-      shellRequest !== null && !records.some((request) => request.id === shellRequest.id)
-        ? [...records, shellRequest]
-        : records;
-    const activity = threadActivity(thread, pending);
-    if (activity === null) threads.delete(thread.id);
-    else threads.set(thread.id, activity);
-  });
-
-  const refresh = Effect.fnUntraced(function* (threadId: ThreadId) {
-    const { threads: rows } = yield* engine.getAgentAwarenessSnapshot(threadId);
-    if (rows[0] === undefined) threads.delete(threadId);
-    else yield* track(rows[0]);
-    yield* Queue.offer(reports, summarizeActivity(threads.values(), null));
-  });
-
-  // Thread entries are only replaced here: subagent threads, which the snapshot leaves out,
-  // stay tracked through their own events.
-  const reconcile = Effect.fnUntraced(function* (openSinceMs: number | null) {
-    const snapshot = yield* engine.getAgentAwarenessSnapshot();
-    yield* Effect.forEach(snapshot.threads, track, { discard: true });
-    yield* Queue.offer(reports, summarizeActivity(threads.values(), openSinceMs));
-  });
-
-  const watchOnce = Effect.gen(function* () {
-    const consumer = yield* Effect.forkScoped(
-      Stream.runForEach(Stream.filter(engine.streamDomainEvents, isActivityEvent), (event) =>
-        refresh(event.threadId).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("music agent watch refresh failed", {
-              threadId: event.threadId,
-              cause,
-            }),
-          ),
-        ),
-      ),
-    );
-    // Only the first watch has requests that predate it; after a restart, anything this watch
-    // has not seen before is new.
-    const first = !(yield* Ref.getAndSet(watchedOnce, true));
-    yield* reconcile(first ? yield* Clock.currentTimeMillis : null);
-    // The event stream starts from the latest event when it first runs, which can land just
-    // after that snapshot. One more pass covers the gap; creation times keep new requests new.
-    yield* Effect.sleep(STREAM_SETTLE_DELAY);
-    yield* reconcile(null);
-    yield* Fiber.join(consumer);
-  }).pipe(Effect.scoped, Effect.withSpan("MusicAgentWatch.watch"));
-
-  const applyReports = Effect.forever(
-    Effect.gen(function* () {
-      const first = yield* Queue.take(reports);
-      const rest = yield* Queue.takeAll(reports);
-      const cue = yield* settings.getSettings.pipe(
-        Effect.map((current) => current.musicAgentCue),
-        Effect.orElseSucceed(() => "off" as const),
-      );
-      yield* player.observeAgents(mergeReports([first, ...rest]), cue);
-    }),
-  );
-
-  // A stream that fails resubscribes and reconciles from a fresh snapshot.
-  const watchLoop = Effect.forever(
-    watchOnce.pipe(
-      Effect.catchCause((cause) => Effect.logWarning("music agent watch restarting", { cause })),
-      Effect.andThen(Effect.sleep(RESUBSCRIBE_DELAY)),
+  // Read failures surface as defects; the worker logs them and carries on with the next batch.
+  const source: AgentSource = {
+    listThreads: engine.getAgentAwarenessSnapshot().pipe(
+      Effect.map((snapshot) => snapshot.threads),
+      Effect.orDie,
     ),
+    readThread: (threadId) =>
+      engine.getAgentAwarenessSnapshot(ThreadId.make(threadId)).pipe(
+        Effect.map((snapshot) => snapshot.threads[0] ?? null),
+        Effect.orDie,
+      ),
+    pendingRequests: (threadId) =>
+      engine
+        .getThreadRecords(ThreadId.make(threadId), ["runtimeRequests"], {
+          runtimeRequestStatuses: ["pending"],
+        })
+        .pipe(
+          Effect.map((records) =>
+            records.runtimeRequests.filter((request) => request.status === "pending"),
+          ),
+          Effect.orDie,
+        ),
+    changes: engine.streamDomainEvents.pipe(
+      Stream.filter(isActivityEvent),
+      Stream.map((event): string => event.threadId),
+      Stream.orDie,
+    ),
+  };
+
+  const readCue = settings.getSettings.pipe(
+    Effect.map((current): MusicAgentCue => current.musicAgentCue),
+    Effect.orElseSucceed((): MusicAgentCue => "off"),
   );
 
   return MusicAgentWatch.of({
     start: Effect.fn("MusicAgentWatch.start")(function* () {
       if (platform !== "darwin") return;
-      yield* forkParked(Effect.all([applyReports, watchLoop], { concurrency: 2, discard: true }));
+      yield* forkParked(
+        runAgentWatch({
+          source,
+          observe: (activity) =>
+            readCue.pipe(Effect.flatMap((cue) => player.observeAgents(activity, cue))),
+        }),
+      );
     }),
   });
 });
