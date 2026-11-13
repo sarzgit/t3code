@@ -97,9 +97,18 @@ describe("runAgentWatch", () => {
     const pending = new Map<string, ReadonlyArray<ReturnType<typeof request>>>();
     const changes = yield* Queue.unbounded<string>();
     const observed = yield* Queue.unbounded<AgentActivity>();
+    const failedReads = new Set<string>();
+    const readFailures = yield* Queue.unbounded<string>();
     const source: AgentSource = {
       listThreads: Effect.sync(() => [...listed.values()]),
-      readThread: (id) => Effect.sync(() => all.get(id) ?? null),
+      readThread: (id) =>
+        Effect.gen(function* () {
+          if (failedReads.delete(id)) {
+            yield* Queue.offer(readFailures, id);
+            return yield* Effect.die("test read failure");
+          }
+          return all.get(id) ?? null;
+        }),
       pendingRequests: (id) => Effect.sync(() => pending.get(id) ?? []),
       changes: Stream.fromQueue(changes),
     };
@@ -124,7 +133,7 @@ describe("runAgentWatch", () => {
     );
     // The watch starts at clock zero and reports its first listing at once.
     yield* Queue.take(observed);
-    return { changes, observed, setThread, removeThread };
+    return { changes, observed, setThread, removeThread, failedReads, readFailures };
   });
 
   it.effect("reports a lone new request and its answer without waiting for more events", () =>
@@ -136,9 +145,18 @@ describe("runAgentWatch", () => {
       assert.deepStrictEqual([...asked.requestIds], ["new"]);
       assert.strictEqual(asked.preexisting.size, 0);
 
+      // Finish the startup reconcile before the only answer event fails to read.
+      yield* TestClock.adjust("2 seconds");
+      yield* Queue.take(world.observed);
       world.setThread(watched("t1"), [], { listed: true });
+      world.failedReads.add("t1");
       yield* Queue.offer(world.changes, "t1");
-      assert.strictEqual((yield* Queue.take(world.observed)).requestIds.size, 0);
+      yield* Queue.take(world.readFailures);
+      yield* TestClock.adjust("1 second");
+      assert.deepStrictEqual(
+        (yield* Queue.clear(world.observed)).map((activity) => [...activity.requestIds]),
+        [[]],
+      );
     }).pipe(Effect.scoped),
   );
 

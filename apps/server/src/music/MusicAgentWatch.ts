@@ -111,7 +111,7 @@ export interface AgentSource {
 
 type Work = { readonly _tag: "thread"; readonly id: string } | { readonly _tag: "reconcile" };
 
-const RESUBSCRIBE_DELAY = "1 second";
+const RETRY_DELAY = "1 second";
 const STREAM_SETTLE_DELAY = "2 seconds";
 
 /**
@@ -163,8 +163,17 @@ export const runAgentWatch = Effect.fn("MusicAgentWatch.run")(function* (input: 
 
   const worker = Effect.forever(
     Queue.takeAll(work).pipe(
-      Effect.flatMap(processBatch),
-      Effect.catchCause((cause) => Effect.logWarning("music agent watch batch failed", { cause })),
+      Effect.flatMap((batch) =>
+        processBatch(batch).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("music agent watch batch failed", { cause }).pipe(
+              Effect.andThen(Effect.sleep(RETRY_DELAY)),
+              // Keep lone answer events so a transient read failure cannot strand the cue.
+              Effect.andThen(Queue.offerAll(work, batch)),
+            ),
+          ),
+        ),
+      ),
     ),
   );
 
@@ -184,7 +193,7 @@ export const runAgentWatch = Effect.fn("MusicAgentWatch.run")(function* (input: 
   const watchLoop = Effect.forever(
     watchOnce.pipe(
       Effect.catchCause((cause) => Effect.logWarning("music agent watch restarting", { cause })),
-      Effect.andThen(Effect.sleep(RESUBSCRIBE_DELAY)),
+      Effect.andThen(Effect.sleep(RETRY_DELAY)),
     ),
   );
 
