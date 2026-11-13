@@ -52,15 +52,17 @@ preference is saved separately on each device.
 ## Music player
 
 When your T3 Code server runs on a Mac, the bottom of the sidebar shows what the Music app is
-playing, with play/pause and next. Click it to choose one of your library playlists, go back a track,
-or turn shuffle on or off. The command palette also has **Music: Play/Pause**, **Next track**, and
-**Previous track**. Audio plays on the Mac running the server, even when you control it from another
-device.
+playing, with a seek bar, shuffle, previous, play/pause, next, repeat, and Music's volume. Click the
+song to open your library playlists; click a playlist to see its songs, search them, and start one,
+or use **Play** and **Shuffle** for the whole playlist. The command palette also has
+**Music: Play/Pause**, **Next track**, and **Previous track**. Audio plays on the Mac running the
+server, even when you control it from another device.
 
 Only playlists in your Music library appear; add an Apple Music playlist to your library to play it
 here. Pin a playlist to keep it at the top of the list, or remove one you never play from T3 Code's
 list; **Hidden** at the bottom brings it back. These choices are saved on the Mac, so every device
-connected to it sees the same list, and Apple Music's own playlists never change. The first time, macOS asks whether T3 Code may control Music. If you declined, allow it under
+connected to it sees the same list, and Apple Music's own playlists never change. The first time,
+macOS asks whether T3 Code may control Music. If you declined, allow it under
 **System Settings → Privacy & Security → Automation**. Turn off **Music player** in
 **Settings → Appearance** to hide it.
 

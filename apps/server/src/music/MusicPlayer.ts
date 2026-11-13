@@ -3,9 +3,12 @@ import {
   type MusicArtwork,
   type MusicArtworkInput,
   type MusicControlInput,
+  type MusicListTracksInput,
   type MusicPlayerState,
   type MusicPlaylists,
+  type MusicPlaylistTracks,
   type MusicPlayPlaylistInput,
+  type MusicPlayTrackInput,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cache from "effect/Cache";
@@ -34,6 +37,10 @@ export class MusicPlayer extends Context.Service<
     readonly stateStream: Stream.Stream<MusicPlayerState>;
     readonly listPlaylists: Effect.Effect<MusicPlaylists, MusicError>;
     readonly playPlaylist: (input: MusicPlayPlaylistInput) => Effect.Effect<void, MusicError>;
+    readonly listTracks: (
+      input: MusicListTracksInput,
+    ) => Effect.Effect<MusicPlaylistTracks, MusicError>;
+    readonly playTrack: (input: MusicPlayTrackInput) => Effect.Effect<void, MusicError>;
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
   }
@@ -55,7 +62,7 @@ function emit(value) {
 function sample(Music) {
   if (!Music.running()) return { running: false };
   const state = Music.playerState();
-  const out = { running: true, state: state, shuffle: Music.shuffleEnabled(), track: null, position: 0, playlistId: null };
+  const out = { running: true, state: state, shuffle: Music.shuffleEnabled(), volume: Music.soundVolume(), repeat: Music.songRepeat(), track: null, position: 0, playlistId: null };
   if (state !== "stopped") {
     try {
       const p = Music.currentTrack.properties();
@@ -98,9 +105,43 @@ const LIST_SCRIPT = `function run() {
 }`;
 
 const PLAY_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  if (argv[1] === "shuffle-on") Music.shuffleEnabled = true;
+  if (argv[1] === "shuffle-off") Music.shuffleEnabled = false;
+  found[0].play();
+  return "ok";
+}`;
+
+// Capped and clipped inside the script so the reply stays well under the output limit.
+const LIST_TRACKS_SCRIPT = `function run(argv) {
   const found = Application("Music").playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
-  found[0].play();
+  const tracks = found[0].tracks;
+  const ids = tracks.persistentID();
+  const limit = Math.min(ids.length, Number(argv[1]));
+  const names = tracks.name();
+  const artists = tracks.artist();
+  const durations = tracks.duration();
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 300) : "");
+  const out = [];
+  for (let i = 0; i < limit; i++) {
+    out.push({ id: ids[i], index: i, name: clip(names[i]), artist: clip(artists[i]), durationSec: durations[i] });
+  }
+  return JSON.stringify({ total: ids.length, tracks: out });
+}`;
+
+// A song can appear more than once, so it is found by position, checked against its id.
+const PLAY_TRACK_SCRIPT = `function run(argv) {
+  const found = Application("Music").playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const tracks = found[0].tracks;
+  const ids = tracks.persistentID();
+  const index = Number(argv[2]);
+  const target = ids[index] === argv[1] ? index : ids.indexOf(argv[1]);
+  if (target < 0) return "not-found";
+  tracks[target].play();
   return "ok";
 }`;
 
@@ -112,6 +153,10 @@ const CONTROL_SCRIPT = `function run(argv) {
     case "previous": Music.backTrack(); break;
     case "shuffle-on": Music.shuffleEnabled = true; break;
     case "shuffle-off": Music.shuffleEnabled = false; break;
+    case "seek": Music.playerPosition = Number(argv[1]); break;
+    case "volume": Music.soundVolume = Number(argv[1]); break;
+    // Music ignores repeat changes while no song is loaded.
+    case "repeat": Music.songRepeat = argv[1]; break;
   }
   return "ok";
 }`;
@@ -181,6 +226,8 @@ const RawSample = Schema.Struct({
   ),
   position: Schema.optional(Schema.NullOr(Schema.Number)),
   playlistId: Schema.optional(Schema.NullOr(Schema.String)),
+  volume: Schema.optional(Schema.NullOr(Schema.Number)),
+  repeat: Schema.optional(Schema.NullOr(Schema.String)),
 });
 const decodeRawSample = Schema.decodeUnknownOption(Schema.fromJsonString(RawSample));
 
@@ -188,6 +235,21 @@ const RawPlaylists = Schema.Array(
   Schema.Struct({ id: Schema.String, name: Schema.String, durationSec: Schema.Number }),
 );
 const decodeRawPlaylists = Schema.decodeUnknownOption(Schema.fromJsonString(RawPlaylists));
+
+const RawTracks = Schema.Struct({
+  total: Schema.Number,
+  tracks: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      index: Schema.Number,
+      name: Schema.NullOr(Schema.String),
+      artist: Schema.NullOr(Schema.String),
+      durationSec: Schema.NullOr(Schema.Number),
+    }),
+  ),
+});
+const decodeRawTracks = Schema.decodeUnknownOption(Schema.fromJsonString(RawTracks));
+const MAX_PLAYLIST_TRACKS = 5_000;
 
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
 const seconds = (value: number | null | undefined) =>
@@ -219,6 +281,12 @@ export function decodeWatchLine(line: string): MusicPlayerState | null {
     positionSec: seconds(sample.position),
     shuffle: sample.shuffle ?? false,
     playlistId: persistentId(sample.playlistId),
+    ...(typeof sample.volume === "number" && Number.isFinite(sample.volume)
+      ? { volume: Math.round(Math.min(100, Math.max(0, sample.volume))) }
+      : {}),
+    ...(sample.repeat === "off" || sample.repeat === "one" || sample.repeat === "all"
+      ? { repeat: sample.repeat }
+      : {}),
   };
 }
 
@@ -239,6 +307,8 @@ export function musicStateChanged(
   if (
     before.playback !== next.playback ||
     before.shuffle !== next.shuffle ||
+    before.volume !== next.volume ||
+    before.repeat !== next.repeat ||
     before.playlistId !== next.playlistId ||
     JSON.stringify(before.track) !== JSON.stringify(next.track)
   ) {
@@ -374,6 +444,7 @@ const make = Effect.gen(function* () {
     language: "JavaScript" | "AppleScript",
     script: string,
     args: ReadonlyArray<string>,
+    maxOutputBytes = 1024 * 1024,
   ) {
     if (!supported) return yield* new MusicError({ operation, reason: "unsupported" });
     const output = yield* runner
@@ -387,7 +458,7 @@ const make = Effect.gen(function* () {
           ...args,
         ],
         timeout: SCRIPT_TIMEOUT,
-        maxOutputBytes: 1024 * 1024,
+        maxOutputBytes,
       })
       .pipe(
         Effect.mapError((cause) => new MusicError({ operation, reason: "unavailable", cause })),
@@ -423,16 +494,79 @@ const make = Effect.gen(function* () {
   const playPlaylist = Effect.fn("MusicPlayer.playPlaylist")(function* (
     input: MusicPlayPlaylistInput,
   ) {
-    const result = yield* runScript("play-playlist", "JavaScript", PLAY_SCRIPT, [input.playlistId]);
+    const shuffle =
+      input.shuffle === undefined ? "keep" : input.shuffle ? "shuffle-on" : "shuffle-off";
+    const result = yield* runScript("play-playlist", "JavaScript", PLAY_SCRIPT, [
+      input.playlistId,
+      shuffle,
+    ]);
     if (result === "not-found") {
       return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
     }
   });
 
+  const listTracks = Effect.fn("MusicPlayer.listTracks")(function* (input: MusicListTracksInput) {
+    const result = yield* runScript(
+      "list-tracks",
+      "JavaScript",
+      LIST_TRACKS_SCRIPT,
+      [input.playlistId, String(MAX_PLAYLIST_TRACKS)],
+      8 * 1024 * 1024,
+    );
+    if (result === "not-found") {
+      return yield* new MusicError({ operation: "list-tracks", reason: "not-found" });
+    }
+    const raw = Option.getOrNull(decodeRawTracks(result));
+    if (raw === null) {
+      return yield* new MusicError({ operation: "list-tracks", reason: "unavailable" });
+    }
+    return {
+      total: Math.max(0, Math.floor(raw.total)),
+      tracks: raw.tracks.flatMap((track) => {
+        const id = persistentId(track.id);
+        return id === null || !Number.isInteger(track.index) || track.index < 0
+          ? []
+          : [
+              {
+                id,
+                index: track.index,
+                name: text(track.name),
+                artist: text(track.artist),
+                durationSec: seconds(track.durationSec),
+              },
+            ];
+      }),
+    } satisfies MusicPlaylistTracks;
+  });
+
+  const playTrack = Effect.fn("MusicPlayer.playTrack")(function* (input: MusicPlayTrackInput) {
+    const result = yield* runScript("play-track", "JavaScript", PLAY_TRACK_SCRIPT, [
+      input.playlistId,
+      input.trackId,
+      String(input.index),
+    ]);
+    if (result === "not-found") {
+      return yield* new MusicError({ operation: "play-track", reason: "not-found" });
+    }
+  });
+
+  const controlArgs = (input: MusicControlInput): ReadonlyArray<string> => {
+    switch (input._tag) {
+      case "set-shuffle":
+        return [input.enabled ? "shuffle-on" : "shuffle-off"];
+      case "seek":
+        return ["seek", String(input.positionSec)];
+      case "set-volume":
+        return ["volume", String(input.volume)];
+      case "set-repeat":
+        return ["repeat", input.mode];
+      default:
+        return [input._tag];
+    }
+  };
+
   const control = Effect.fn("MusicPlayer.control")(function* (input: MusicControlInput) {
-    const action =
-      input._tag === "set-shuffle" ? (input.enabled ? "shuffle-on" : "shuffle-off") : input._tag;
-    yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [action]);
+    yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
   });
 
   const extractArtwork = Effect.fn("MusicPlayer.extractArtwork")(function* (trackId: string) {
@@ -477,7 +611,15 @@ const make = Effect.gen(function* () {
     );
   });
 
-  return MusicPlayer.of({ stateStream, listPlaylists, playPlaylist, control, artwork });
+  return MusicPlayer.of({
+    stateStream,
+    listPlaylists,
+    playPlaylist,
+    listTracks,
+    playTrack,
+    control,
+    artwork,
+  });
 });
 
 export const layer = Layer.effect(MusicPlayer, make);

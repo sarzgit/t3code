@@ -1,7 +1,13 @@
 import type { MusicPlayerState } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { arrangeMusicPlaylists, musicPositionAt } from "./music.ts";
+import {
+  arrangeMusicPlaylists,
+  formatTrackTime,
+  musicPositionAt,
+  nextRepeatMode,
+  withSeekAnchor,
+} from "./music.ts";
 
 const ready = (
   overrides: Partial<Extract<MusicPlayerState, { _tag: "ready" }>> = {},
@@ -56,5 +62,33 @@ describe("arrangeMusicPlaylists", () => {
     expect(names(arranged.pinned)).toEqual(["Gym"]);
     expect(names(arranged.listed)).toEqual(["Old gym mix"]);
     expect(names(arranged.hidden)).toEqual(["Chill"]);
+  });
+});
+
+describe("player controls", () => {
+  it.each([
+    [0, "0:00"],
+    [7.9, "0:07"],
+    [187, "3:07"],
+    [3729, "1:02:09"],
+  ] as const)("formats %s seconds as %s", (seconds, expected) => {
+    expect(formatTrackTime(seconds)).toBe(expected);
+  });
+
+  it("cycles repeat off, all, one, off", () => {
+    expect([nextRepeatMode("off"), nextRepeatMode("all"), nextRepeatMode("one")]).toEqual([
+      "all",
+      "one",
+      "off",
+    ]);
+  });
+
+  it("keeps a sent seek until the server reports anything newer", () => {
+    const received = { state: ready({ positionSec: 10 }), receivedAtMs: 1_000 };
+    const anchor = { positionSec: 90, atMs: 5_000 };
+    const anchored = withSeekAnchor(received, anchor);
+    expect(musicPositionAt(anchored, 6_000)).toBe(91);
+    const newer = { state: ready({ positionSec: 40 }), receivedAtMs: 7_000 };
+    expect(withSeekAnchor(newer, anchor)).toBe(newer);
   });
 });

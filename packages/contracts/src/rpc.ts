@@ -416,9 +416,12 @@ import {
   MusicArtworkInput,
   MusicControlInput,
   MusicError,
+  MusicListTracksInput,
   MusicPlayerState,
   MusicPlaylists,
+  MusicPlaylistTracks,
   MusicPlayPlaylistInput,
+  MusicPlayTrackInput,
 } from "./music.ts";
 
 export const WS_METHODS = {
@@ -632,6 +635,8 @@ export const WS_METHODS = {
   subscribeMusicState: "subscribeMusicState",
   musicListPlaylists: "music.listPlaylists",
   musicPlayPlaylist: "music.playPlaylist",
+  musicListTracks: "music.listTracks",
+  musicPlayTrack: "music.playTrack",
   musicControl: "music.control",
   musicGetArtwork: "music.getArtwork",
   subscribeServerConfig: "subscribeServerConfig",
@@ -1801,6 +1806,17 @@ const WsMusicPlayPlaylistRpc = Rpc.make(WS_METHODS.musicPlayPlaylist, {
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
 });
 
+const WsMusicListTracksRpc = Rpc.make(WS_METHODS.musicListTracks, {
+  payload: MusicListTracksInput,
+  success: MusicPlaylistTracks,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicPlayTrackRpc = Rpc.make(WS_METHODS.musicPlayTrack, {
+  payload: MusicPlayTrackInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsMusicControlRpc = Rpc.make(WS_METHODS.musicControl, {
   payload: MusicControlInput,
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
@@ -2302,6 +2318,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeMusicStateRpc,
   WsMusicListPlaylistsRpc,
   WsMusicPlayPlaylistRpc,
+  WsMusicListTracksRpc,
+  WsMusicPlayTrackRpc,
   WsMusicControlRpc,
   WsMusicGetArtworkRpc,
   WsSubscribeServerConfigRpc,

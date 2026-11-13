@@ -115,26 +115,41 @@ describe("decodeWatchLine", () => {
     assert.deepStrictEqual(MusicPlayer.decodeWatchLine('{"running":false}'), {
       _tag: "not-running",
     });
-    assert.deepStrictEqual(MusicPlayer.decodeWatchLine(sampleLine({ state: "fast forwarding" })), {
-      _tag: "ready",
-      playback: "playing",
-      track: {
-        id: "3BA40D4A07B97011",
-        name: "Song",
-        artist: "Artist",
-        album: "Album",
-        durationSec: 200,
+    assert.deepStrictEqual(
+      MusicPlayer.decodeWatchLine(
+        sampleLine({ state: "fast forwarding", volume: 62.4, repeat: "one" }),
+      ),
+      {
+        _tag: "ready",
+        playback: "playing",
+        track: {
+          id: "3BA40D4A07B97011",
+          name: "Song",
+          artist: "Artist",
+          album: "Album",
+          durationSec: 200,
+        },
+        positionSec: 10,
+        shuffle: false,
+        playlistId: "5CA38D01224697B3",
+        volume: 62,
+        repeat: "one",
       },
-      positionSec: 10,
-      shuffle: false,
-      playlistId: "5CA38D01224697B3",
-    });
+    );
     const odd = MusicPlayer.decodeWatchLine(
-      sampleLine({ track: { id: "not-an-id" }, position: null, playlistId: "x" }),
+      sampleLine({
+        track: { id: "not-an-id" },
+        position: null,
+        playlistId: "x",
+        volume: null,
+        repeat: "sometimes",
+      }),
     );
     assert.deepStrictEqual(
-      odd?._tag === "ready" ? [odd.track, odd.positionSec, odd.playlistId] : odd,
-      [null, 0, null],
+      odd?._tag === "ready"
+        ? [odd.track, odd.positionSec, odd.playlistId, odd.volume, odd.repeat]
+        : odd,
+      [null, 0, null, undefined, undefined],
     );
     assert.strictEqual(MusicPlayer.decodeWatchLine("osascript noise"), null);
   });
@@ -164,6 +179,14 @@ describe("musicStateChanged", () => {
     ],
     ["playing on schedule", { state: ready(), atMs: 0 }, ready({ positionSec: 15 }), 5_000, false],
     ["seek while playing", { state: ready(), atMs: 0 }, ready({ positionSec: 60 }), 5_000, true],
+    ["volume changed", { state: ready({ volume: 50 }), atMs: 0 }, ready({ volume: 20 }), 0, true],
+    [
+      "repeat changed",
+      { state: ready({ repeat: "off" }), atMs: 0 },
+      ready({ repeat: "all" }),
+      0,
+      true,
+    ],
     [
       "paused does not advance",
       { state: ready({ playback: "paused" }), atMs: 0 },
@@ -298,11 +321,65 @@ describe("MusicPlayer", () => {
         assert.strictEqual(play.reason, "not-found");
         const [command, ...args] = (yield* Ref.get(calls))[0]!;
         assert.strictEqual(command, "osascript");
-        assert.strictEqual(args.at(-1), playlistId);
-        assert.isFalse(args.slice(0, -1).some((arg) => arg.includes(playlistId)));
+        assert.deepStrictEqual(args.slice(4), [playlistId, "keep"]);
+        assert.isFalse(args.slice(0, 4).some((arg) => arg.includes(playlistId)));
 
         const next = yield* Effect.flip(player.control({ _tag: "next" }));
         assert.strictEqual(next.reason, "permission-denied");
+
+        // Values reach the fixed scripts only as trailing argv.
+        yield* player.control({ _tag: "seek", positionSec: 42.5 });
+        yield* player.control({ _tag: "set-volume", volume: 30 });
+        yield* player.control({ _tag: "set-repeat", mode: "one" });
+        yield* player.playPlaylist({ playlistId: "AAAAAAAAAAAAAAAA", shuffle: false });
+        yield* player.playTrack({
+          playlistId: "AAAAAAAAAAAAAAAA",
+          trackId: "BBBBBBBBBBBBBBBB",
+          index: 3,
+        });
+        const tails = (yield* Ref.get(calls)).slice(-5).map((call) => call.slice(5));
+        assert.deepStrictEqual(tails, [
+          ["seek", "42.5"],
+          ["volume", "30"],
+          ["repeat", "one"],
+          ["AAAAAAAAAAAAAAAA", "shuffle-off"],
+          ["AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB", "3"],
+        ]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("lists a playlist's songs, keeping repeats apart and dropping malformed rows", () =>
+    Effect.gen(function* () {
+      const song = "BBBBBBBBBBBBBBBB";
+      const reply = JSON.stringify({
+        total: 7000,
+        tracks: [
+          { id: song, index: 0, name: "Song", artist: "Artist", durationSec: 200 },
+          { id: song, index: 1, name: "Song", artist: null, durationSec: null },
+          { id: "bad", index: 2, name: "Bad", artist: "", durationSec: 1 },
+        ],
+      });
+      const { calls, runner } = yield* makeHarness({
+        respond: (args) =>
+          Effect.succeed(
+            output({ stdout: args.includes("CCCCCCCCCCCCCCCC") ? "not-found\n" : reply }),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const listed = yield* player.listTracks({ playlistId: "AAAAAAAAAAAAAAAA" });
+        assert.strictEqual(listed.total, 7000);
+        assert.deepStrictEqual(
+          listed.tracks.map((track) => [track.index, track.artist, track.durationSec]),
+          [
+            [0, "Artist", 200],
+            [1, "", 0],
+          ],
+        );
+        assert.deepStrictEqual((yield* Ref.get(calls))[0]!.slice(5), ["AAAAAAAAAAAAAAAA", "5000"]);
+        const missing = yield* Effect.flip(player.listTracks({ playlistId: "CCCCCCCCCCCCCCCC" }));
+        assert.deepStrictEqual([missing.operation, missing.reason], ["list-tracks", "not-found"]);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );

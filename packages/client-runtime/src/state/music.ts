@@ -2,12 +2,14 @@ import {
   type MusicPlayerState,
   type MusicPlaylist,
   type MusicPlaylistPreferences,
+  type MusicRepeatMode,
   WS_METHODS,
 } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
+  createAtomCommandScheduler,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
@@ -16,6 +18,12 @@ import {
 export function createMusicEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
+  // One Music lane per environment: commands land in click order, so the latest value wins.
+  const scheduler = createAtomCommandScheduler();
+  const concurrency = {
+    mode: "serial" as const,
+    key: ({ environmentId }: { environmentId: string }) => environmentId,
+  };
   return {
     // The server keeps a Music watcher running while anyone subscribes, so let go at once.
     state: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
@@ -36,13 +44,29 @@ export function createMusicEnvironmentAtoms<R, E>(
       refreshIntervalMs: 15_000,
       isFinal: (artwork) => artwork.dataUrl !== null,
     }),
+    tracks: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:tracks",
+      tag: WS_METHODS.musicListTracks,
+      staleTimeMs: 30_000,
+      idleTtlMs: 60_000,
+    }),
     playPlaylist: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:music:play-playlist",
       tag: WS_METHODS.musicPlayPlaylist,
+      scheduler,
+      concurrency,
+    }),
+    playTrack: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:play-track",
+      tag: WS_METHODS.musicPlayTrack,
+      scheduler,
+      concurrency,
     }),
     control: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:music:control",
       tag: WS_METHODS.musicControl,
+      scheduler,
+      concurrency,
     }),
   };
 }
@@ -103,5 +127,40 @@ export function arrangeMusicPlaylists(
       (playlist) => !pinnedIds.has(playlist.id) && !hiddenIds.has(playlist.id) && matches(playlist),
     ),
     hidden: playlists.filter((playlist) => hiddenIds.has(playlist.id)),
+  };
+}
+
+/** "3:07", or "1:02:09" past an hour. */
+export function formatTrackTime(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = String(seconds % 60).padStart(2, "0");
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
+}
+
+export function nextRepeatMode(mode: MusicRepeatMode): MusicRepeatMode {
+  return mode === "off" ? "all" : mode === "all" ? "one" : "off";
+}
+
+/** Where this client sent a seek; it stands in for the server's position until a newer state. */
+export interface MusicSeekAnchor {
+  readonly positionSec: number;
+  readonly atMs: number;
+}
+
+/**
+ * The watcher only reports a seek that moves more than two seconds from where clients expect,
+ * so a small seek may never be confirmed. A newer server state always wins.
+ */
+export function withSeekAnchor(
+  received: ReceivedMusicState,
+  anchor: MusicSeekAnchor | null,
+): ReceivedMusicState {
+  if (anchor === null || received.receivedAtMs >= anchor.atMs) return received;
+  if (received.state._tag !== "ready") return received;
+  return {
+    state: { ...received.state, positionSec: anchor.positionSec },
+    receivedAtMs: anchor.atMs,
   };
 }

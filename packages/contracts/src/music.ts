@@ -76,6 +76,11 @@ export type MusicTrack = typeof MusicTrack.Type;
 export const MusicPlayback = Schema.Literals(["playing", "paused", "stopped"]);
 export type MusicPlayback = typeof MusicPlayback.Type;
 
+export const MusicRepeatMode = Schema.Literals(["off", "one", "all"]);
+export type MusicRepeatMode = typeof MusicRepeatMode.Type;
+
+export const MusicVolume = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+
 export const MusicPlayerState = Schema.Union([
   /** The server's host is not macOS. */
   Schema.TaggedStruct("unsupported", {}),
@@ -89,6 +94,9 @@ export const MusicPlayerState = Schema.Union([
     positionSec: Schema.Number,
     shuffle: Schema.Boolean,
     playlistId: Schema.NullOr(MusicPersistentId),
+    // Optional so a client still reads a server from before these controls.
+    volume: Schema.optionalKey(MusicVolume),
+    repeat: Schema.optionalKey(MusicRepeatMode),
   }),
 ]);
 export type MusicPlayerState = typeof MusicPlayerState.Type;
@@ -103,14 +111,50 @@ export type MusicPlaylist = typeof MusicPlaylist.Type;
 export const MusicPlaylists = Schema.Struct({ playlists: Schema.Array(MusicPlaylist) });
 export type MusicPlaylists = typeof MusicPlaylists.Type;
 
-export const MusicPlayPlaylistInput = Schema.Struct({ playlistId: MusicPersistentId });
+export const MusicPlayPlaylistInput = Schema.Struct({
+  playlistId: MusicPersistentId,
+  /** Sets shuffle before playing; omitted keeps Music's current setting. */
+  shuffle: Schema.optionalKey(Schema.Boolean),
+});
 export type MusicPlayPlaylistInput = typeof MusicPlayPlaylistInput.Type;
+
+export const MusicPlaylistTrack = Schema.Struct({
+  id: MusicPersistentId,
+  /** Position in the playlist; a song can appear more than once. */
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  name: MusicText,
+  artist: MusicText,
+  durationSec: Schema.Number,
+});
+export type MusicPlaylistTrack = typeof MusicPlaylistTrack.Type;
+
+export const MusicListTracksInput = Schema.Struct({ playlistId: MusicPersistentId });
+export type MusicListTracksInput = typeof MusicListTracksInput.Type;
+
+export const MusicPlaylistTracks = Schema.Struct({
+  tracks: Schema.Array(MusicPlaylistTrack),
+  /** Songs in the playlist; more than `tracks.length` when the list was capped. */
+  total: Schema.Int,
+});
+export type MusicPlaylistTracks = typeof MusicPlaylistTracks.Type;
+
+export const MusicPlayTrackInput = Schema.Struct({
+  playlistId: MusicPersistentId,
+  trackId: MusicPersistentId,
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type MusicPlayTrackInput = typeof MusicPlayTrackInput.Type;
 
 export const MusicControlInput = Schema.Union([
   Schema.TaggedStruct("play-pause", {}),
   Schema.TaggedStruct("next", {}),
   Schema.TaggedStruct("previous", {}),
   Schema.TaggedStruct("set-shuffle", { enabled: Schema.Boolean }),
+  Schema.TaggedStruct("seek", {
+    positionSec: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 86_400 })),
+  }),
+  Schema.TaggedStruct("set-volume", { volume: MusicVolume }),
+  Schema.TaggedStruct("set-repeat", { mode: MusicRepeatMode }),
 ]);
 export type MusicControlInput = typeof MusicControlInput.Type;
 
@@ -124,7 +168,14 @@ export const MusicArtwork = Schema.Struct({
 export type MusicArtwork = typeof MusicArtwork.Type;
 
 export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
-  operation: Schema.Literals(["list-playlists", "play-playlist", "control", "artwork"]),
+  operation: Schema.Literals([
+    "list-playlists",
+    "play-playlist",
+    "list-tracks",
+    "play-track",
+    "control",
+    "artwork",
+  ]),
   reason: Schema.Literals(["unsupported", "permission-denied", "not-found", "unavailable"]),
   cause: Schema.optional(Schema.Defect()),
 }) {
@@ -135,7 +186,9 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
       case "permission-denied":
         return "Allow T3 Code to control Music in System Settings › Privacy & Security › Automation.";
       case "not-found":
-        return "That playlist is no longer in your Music library.";
+        return this.operation === "play-track"
+          ? "That song is no longer in this playlist."
+          : "That playlist is no longer in your Music library.";
       case "unavailable":
         return "The Music app did not respond. Try again.";
     }

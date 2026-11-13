@@ -79,10 +79,15 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.subscribeMusicState,
       WS_METHODS.musicListPlaylists,
       WS_METHODS.musicGetArtwork,
+      WS_METHODS.musicListTracks,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
     }
-    for (const method of [WS_METHODS.musicPlayPlaylist, WS_METHODS.musicControl]) {
+    for (const method of [
+      WS_METHODS.musicPlayPlaylist,
+      WS_METHODS.musicPlayTrack,
+      WS_METHODS.musicControl,
+    ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }
   });
