@@ -239,70 +239,86 @@ function isImportableDay(day: string, todayMs: number): boolean {
 }
 
 /**
- * Mutates `file`. Rows for the same day and song within a chunk add up (Apple's export repeats
- * them); across chunks and imports the larger value wins, so re-importing a full export, or one
- * that overlaps an earlier one, changes nothing. `coveredThrough` comes with the last chunk.
+ * Returns a new file and leaves `file` untouched, so a failed save changes nothing. Rows for the
+ * same day and song within a chunk add up (Apple's export repeats them); across chunks and
+ * imports the larger value wins, so re-importing a full export, or one that overlaps an earlier
+ * one, changes nothing. `coveredThrough` comes with the last chunk and can't pass imported rows.
  */
-export function importListeningHistory(
+export function withImportedHistory(
   file: ListeningHistoryFile,
   input: MusicImportHistoryInput,
   todayMs: number,
-): void {
+): ListeningHistoryFile {
   const chunk = dictionary<Record<string, SongSeconds>>();
   for (const row of input.rows) {
     if (!(row.seconds > 0) || !isImportableDay(row.day, todayMs)) continue;
     addSeconds((chunk[row.day] ??= dictionary()), songKey(row.name, row.artist), row, row.seconds);
   }
+  const imported = Object.assign(dictionary<Record<string, SongSeconds>>(), file.imported);
   for (const [day, songs] of Object.entries(chunk)) {
-    const stored = (file.imported[day] ??= dictionary());
+    const stored = Object.assign(dictionary<SongSeconds>(), imported[day]);
     for (const [key, song] of Object.entries(songs)) {
       const seconds = Math.min(song.seconds, DAY_SECONDS);
       if (seconds > (stored[key]?.seconds ?? 0)) stored[key] = { ...song, seconds };
     }
+    imported[day] = stored;
   }
+  let importedThrough = file.importedThrough;
   const covered = input.coveredThrough;
   if (
     covered !== undefined &&
-    isImportableDay(covered, todayMs) &&
-    (file.importedThrough === null || covered > file.importedThrough)
+    (importedThrough === null || covered > importedThrough) &&
+    Object.keys(imported).some((day) => day >= covered)
   ) {
-    file.importedThrough = covered;
+    importedThrough = covered;
   }
+  return { ...file, imported, importedThrough };
 }
 
-/** Mutates `file`, removing imported history only. */
-export function clearImportedHistory(file: ListeningHistoryFile): void {
-  file.imported = dictionary();
-  file.importedThrough = null;
+/** Returns a new file without imported history; scans and the library baseline stay. */
+export function withoutImportedHistory(file: ListeningHistoryFile): ListeningHistoryFile {
+  return { ...file, imported: dictionary(), importedThrough: null };
 }
 
 /**
- * Mutates `file`. Music only counts a play once a song
- * finishes, so each new play is credited at the song's length on the day of its last play.
- * The first scan only records a baseline. A count that drops, or a track id the last scan did
- * not see (a new song, or a rebuilt library), resets that track's baseline without credit.
+ * Mutates `file`; true when worth saving. Music counts a play once a song finishes, so a new
+ * play earns the song's length on its last-played day. The first scan, a dropped count and an
+ * unseen id (a rebuilt library) only set a baseline. Exported days are left to the export.
  */
 export function scanLibrary(
   file: ListeningHistoryFile,
   tracks: ReadonlyArray<LibraryTrack>,
   nowMs: number,
-): void {
+): boolean {
   const counts = dictionary<number>();
   for (const track of tracks) counts[track.id] = track.playedCount;
   const previous = file.library;
   file.library = { scannedAtMs: nowMs, counts };
-  if (previous === null) return;
-  // No more plays than fit since the last scan, so an iCloud merge of old counts can't flood a day.
-  const elapsedSec = Math.max(0, nowMs - previous.scannedAtMs) / 1000;
-  for (const track of tracks) {
+  if (previous === null) return true;
+  let changed = Object.keys(previous.counts).length !== tracks.length;
+  const increased = tracks.filter((track) => {
     const before = previous.counts[track.id];
-    if (before === undefined || track.playedCount <= before || !(track.durationSec > 0)) continue;
-    const plays = Math.min(
-      track.playedCount - before,
-      Math.floor(elapsedSec / track.durationSec) + 1,
-    );
-    const seconds = Math.min(plays * track.durationSec, DAY_SECONDS);
+    if (before !== track.playedCount) changed = true;
+    return before !== undefined && track.playedCount > before && track.durationSec > 0;
+  });
+  // One budget for the whole scan: no more listening than fits since the last scan (plus the
+  // song already playing then), so an iCloud merge of old counts can't flood the stats.
+  let budgetSec =
+    Math.max(0, nowMs - previous.scannedAtMs) / 1000 +
+    Math.max(0, ...increased.map((track) => track.durationSec));
+  const newestFirst = increased.toSorted(
+    (left, right) => (right.playedAtMs ?? nowMs) - (left.playedAtMs ?? nowMs),
+  );
+  for (const track of newestFirst) {
     const day = localDayKey(track.playedAtMs ?? nowMs);
+    if (file.importedThrough !== null && day <= file.importedThrough) continue;
+    const plays = Math.min(
+      track.playedCount - previous.counts[track.id]!,
+      Math.floor(budgetSec / track.durationSec),
+    );
+    if (plays <= 0) continue;
+    const seconds = plays * track.durationSec;
+    budgetSec -= seconds;
     addSeconds(
       (file.synced[day] ??= dictionary()),
       songKey(track.name, track.artist),
@@ -310,6 +326,7 @@ export function scanLibrary(
       seconds,
     );
   }
+  return changed;
 }
 
 const daySeconds = (songs: ReadonlyArray<SongSeconds>) =>
@@ -318,24 +335,20 @@ const larger = (left: ReadonlyArray<SongSeconds>, right: ReadonlyArray<SongSecon
   daySeconds(left) >= daySeconds(right) ? left : right;
 
 /**
- * One day's songs, from whichever source saw the most of it. The same play can appear in T3's
- * samples, the export and library scans under different song names, so sources are never added
- * together: a day can come out low when sources saw different plays, but never double counted.
- * The export replaces library scans for the days it fully covers (all but its last).
+ * The export covers the whole account, so its days use it alone (it may date by UTC; mixing
+ * local days in could count a midnight play twice). Later days take the source that saw most:
+ * one play can sit in several under different names, so sources are never added together.
  */
 function mergeDay(
   stats: ListeningStatsFile,
   history: ListeningHistoryFile,
   date: string,
 ): ReadonlyArray<SongSeconds> {
-  const local = Object.values(stats.days[date]?.tracks ?? {});
   const imported = Object.values(history.imported[date] ?? {});
+  if (history.importedThrough !== null && date <= history.importedThrough) return imported;
+  const local = Object.values(stats.days[date]?.tracks ?? {});
   const synced = Object.values(history.synced[date] ?? {});
-  const outside =
-    history.importedThrough !== null && date < history.importedThrough
-      ? imported
-      : larger(imported, synced);
-  return larger(outside, local);
+  return larger(larger(imported, synced), local);
 }
 
 const top = <A>(entries: Map<string, A & { seconds: number }>) =>
@@ -456,17 +469,26 @@ const makeJsonFile = Effect.fn("MusicListeningStats.makeJsonFile")(function* <A>
   });
 
   /** Fails when the file must not be written this run or the write fails. */
-  const write = Effect.gen(function* () {
-    if (loaded === null) return;
+  const save = Effect.fn("MusicListeningStats.save")(function* (value: A) {
     if (readOnly) return yield* Effect.fail("read-only" as const);
-    const contents = yield* options.encode(loaded);
+    const contents = yield* options.encode(value);
     yield* writeFileStringAtomically({ filePath, contents }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
   });
+  const write = Effect.suspend(() => (loaded === null ? Effect.void : save(loaded)));
+  /** Saves `next` and only then makes it the loaded value. */
+  const replace = (next: A) =>
+    save(next).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          loaded = next;
+        }),
+      ),
+    );
 
-  return { load, write, isReadOnly: () => readOnly };
+  return { load, write, replace, isReadOnly: () => readOnly };
 });
 
 const make = Effect.gen(function* () {
@@ -509,8 +531,7 @@ const make = Effect.gen(function* () {
     yield* lock.withPermits(1)(
       history.load.pipe(
         Effect.map((file) => {
-          scanLibrary(file, tracks, now);
-          historyDirty = true;
+          if (scanLibrary(file, tracks, now)) historyDirty = true;
         }),
       ),
     );
@@ -545,38 +566,36 @@ const make = Effect.gen(function* () {
     return summarizeListening(statsFile, historyFile, input.days, yield* Clock.currentTimeMillis);
   });
 
-  // An import or removal the user waits on is saved before it reports success.
-  const changeHistory = <A>(change: (file: ListeningHistoryFile) => A) =>
-    lock.withPermits(1)(
-      Effect.gen(function* () {
-        const file = yield* history.load;
-        if (history.isReadOnly()) return yield* Effect.fail("read-only" as const);
-        const result = change(file);
-        historyDirty = true;
-        yield* history.write;
-        historyDirty = false;
-        return result;
-      }),
-    );
+  // An import or removal the user waits on is saved before it reports success, and a failed
+  // save leaves both the file and what summaries show unchanged.
+  const changeHistory = (change: (file: ListeningHistoryFile) => ListeningHistoryFile) =>
+    lock
+      .withPermits(1)(
+        Effect.gen(function* () {
+          const next = change(yield* history.load);
+          yield* history.replace(next);
+          historyDirty = false;
+          return next;
+        }),
+      )
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.fail(
+            new MusicError({ operation: "import-history", reason: "unavailable", cause }),
+          ),
+        ),
+      );
 
   const importHistory = Effect.fn("MusicListeningStats.importHistory")(function* (
     input: MusicImportHistoryInput,
   ) {
     const now = yield* Clock.currentTimeMillis;
-    return yield* changeHistory((file) => {
-      importListeningHistory(file, input, now);
-      return { importedThrough: file.importedThrough } satisfies MusicImportHistoryResult;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.fail(new MusicError({ operation: "import-history", reason: "unavailable", cause })),
-      ),
-    );
+    const next = yield* changeHistory((file) => withImportedHistory(file, input, now));
+    return { importedThrough: next.importedThrough } satisfies MusicImportHistoryResult;
   });
 
-  const clearHistory = changeHistory(clearImportedHistory).pipe(
-    Effect.catchCause((cause) =>
-      Effect.fail(new MusicError({ operation: "import-history", reason: "unavailable", cause })),
-    ),
+  const clearHistory = changeHistory(withoutImportedHistory).pipe(
+    Effect.asVoid,
     Effect.withSpan("MusicListeningStats.clearHistory"),
   );
 
@@ -597,7 +616,7 @@ export const layer = Layer.effect(MusicListeningStats, make);
 /** In-memory store for tests and hosts that never persist. */
 export const layerMemory = Layer.sync(MusicListeningStats, () => {
   const stats = emptyListeningStats();
-  const history = emptyListeningHistory();
+  let history = emptyListeningHistory();
   return MusicListeningStats.of({
     credit: Effect.fnUntraced(function* (entry: ListeningCredit) {
       yield* Effect.sync(() => creditListening(stats, entry));
@@ -613,10 +632,12 @@ export const layerMemory = Layer.sync(MusicListeningStats, () => {
     importHistory: Effect.fnUntraced(function* (input: MusicImportHistoryInput) {
       const now = yield* Clock.currentTimeMillis;
       return yield* Effect.sync(() => {
-        importListeningHistory(history, input, now);
+        history = withImportedHistory(history, input, now);
         return { importedThrough: history.importedThrough };
       });
     }),
-    clearHistory: Effect.sync(() => clearImportedHistory(history)),
+    clearHistory: Effect.sync(() => {
+      history = withoutImportedHistory(history);
+    }),
   });
 });

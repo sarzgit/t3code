@@ -94,7 +94,8 @@ export const layer = Layer.effectDiscard(
       });
       if (output.code !== 0) return;
       const tracks = decodeLibraryScan(output.stdout.trim());
-      if (tracks === null) return;
+      // Music can answer before its library loads; an empty scan would wipe the baseline.
+      if (tracks === null || tracks.length === 0) return;
       yield* listening.scanLibrary(tracks);
       yield* listening.flush;
     }).pipe(

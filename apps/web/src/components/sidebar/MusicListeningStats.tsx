@@ -98,6 +98,7 @@ export function ListeningStats({ environmentId }: { environmentId: EnvironmentId
             <HistoryMenu
               environmentId={environmentId}
               importedThrough={stats.importedThrough ?? null}
+              importing={importStatus._tag === "importing"}
               onStatus={setImportStatus}
               onChange={query.refresh}
             />
@@ -123,6 +124,7 @@ export function ListeningStats({ environmentId }: { environmentId: EnvironmentId
 function HistoryMenu(props: {
   environmentId: EnvironmentId;
   importedThrough: string | null;
+  importing: boolean;
   onStatus: (status: ImportStatus) => void;
   onChange: () => void;
 }) {
@@ -131,7 +133,6 @@ function HistoryMenu(props: {
   const importHistory = useAtomCommand(musicEnvironment.importHistory);
   const clearHistory = useAtomCommand(musicEnvironment.clearHistory);
   const fileInput = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
 
   const importFile = async (file: File) => {
     if (file.size > MAX_HISTORY_FILE_BYTES) {
@@ -165,7 +166,13 @@ function HistoryMenu(props: {
       });
       if (result._tag !== "Success") {
         // Saved chunks stay; importing the file again finishes the rest without double counting.
-        onStatus({ _tag: "failed", message: "Import stopped partway. Import the file again." });
+        onStatus({
+          _tag: "failed",
+          message:
+            start === 0
+              ? "Import failed. Try again."
+              : "Import stopped partway. Import the file again.",
+        });
         return;
       }
     }
@@ -186,18 +193,14 @@ function HistoryMenu(props: {
           const file = event.target.files?.[0];
           event.target.value = "";
           if (!file) return;
-          setBusy(true);
-          void importFile(file).finally(() => {
-            setBusy(false);
-            props.onChange();
-          });
+          void importFile(file).finally(props.onChange);
         }}
       />
       <Menu>
         <MenuTrigger
           render={<Button variant="ghost-muted" size="icon-sm" />}
           aria-label="Listening history"
-          disabled={busy}
+          disabled={props.importing}
         >
           <EllipsisIcon />
         </MenuTrigger>
@@ -217,20 +220,17 @@ function HistoryMenu(props: {
               Import Apple Music history…
             </MenuItem>
           </MenuGroup>
-          {props.importedThrough === null ? null : (
-            <>
-              <MenuSeparator />
-              <MenuItem
-                variant="destructive"
-                onClick={() => {
-                  onStatus({ _tag: "idle" });
-                  void clearHistory({ environmentId, input: {} }).then(props.onChange);
-                }}
-              >
-                Remove imported history
-              </MenuItem>
-            </>
-          )}
+          {/* Offered even with no covered day: a stopped first import still leaves rows. */}
+          <MenuSeparator />
+          <MenuItem
+            variant="destructive"
+            onClick={() => {
+              onStatus({ _tag: "idle" });
+              void clearHistory({ environmentId, input: {} }).then(props.onChange);
+            }}
+          >
+            Remove imported history
+          </MenuItem>
         </MenuPopup>
       </Menu>
     </>

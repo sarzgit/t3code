@@ -70,6 +70,7 @@ describe("summarizeListening", () => {
 });
 
 describe("listening history", () => {
+  const MINUTE_MS = 60 * 1000;
   const day = (offset: number) => Stats.localDayKey(NOW - offset * DAY_MS);
   const row = (offset: number, name: string, artist: string, seconds: number) => ({
     day: day(offset),
@@ -77,43 +78,43 @@ describe("listening history", () => {
     artist,
     seconds,
   });
-  const importRows = (
+  const imported = (
     history: Stats.ListeningHistoryFile,
     rows: ReadonlyArray<ReturnType<typeof row>>,
     coveredThrough?: string,
   ) =>
-    Stats.importListeningHistory(
+    Stats.withImportedHistory(
       history,
       coveredThrough === undefined ? { rows } : { rows, coveredThrough },
       NOW,
     );
-  const songs = (stats: { tracks: ReadonlyArray<{ name: string; seconds: number }> }) =>
-    stats.tracks.map((track) => [track.name, track.seconds]);
+  const total = (history: Stats.ListeningHistoryFile, days: 1 | 7 = 7) =>
+    Stats.summarizeListening(Stats.emptyListeningStats(), history, days, NOW).totalSec;
 
   it("imports idempotently: repeated rows add up within a chunk, overlaps keep the larger", () => {
-    const history = Stats.emptyListeningHistory();
     // Apple's export repeats a day and song; both rows are listening.
     const chunk = [row(2, "Song", "Artist", 100), row(2, "song ", "ARTIST", 50)];
-    importRows(history, chunk);
-    importRows(history, chunk);
-    const stats = Stats.emptyListeningStats();
-    assert.deepStrictEqual(songs(Stats.summarizeListening(stats, history, 7, NOW)), [
-      ["Song", 150],
-    ]);
+    const empty = Stats.emptyListeningHistory();
+    let history = imported(imported(empty, chunk), chunk);
+    assert.strictEqual(total(history), 150);
+    assert.deepStrictEqual(empty.imported, {});
     // A later export covering the same day (and a partial earlier one) never adds twice.
-    importRows(history, [row(2, "Song", "Artist", 120)]);
-    importRows(history, [row(2, "Song", "Artist", 200), row(1, "B", "X", 60)], day(1));
-    const week = Stats.summarizeListening(stats, history, 7, NOW);
+    history = imported(history, [row(2, "Song", "Artist", 120)]);
+    history = imported(history, [row(2, "Song", "Artist", 200), row(1, "B", "X", 60)], day(1));
+    const week = Stats.summarizeListening(Stats.emptyListeningStats(), history, 7, NOW);
     assert.strictEqual(week.totalSec, 260);
     assert.strictEqual(week.importedThrough, day(1));
     assert.deepStrictEqual(week.projects, []);
   });
 
-  it("drops impossible and future days", () => {
-    const history = Stats.emptyListeningHistory();
-    importRows(history, [{ ...row(0, "A", "B", 10), day: "2026-02-31" }, row(-5, "A", "B", 10)]);
-    importRows(history, [], day(-5));
+  it("drops impossible and future days, and coverage past the imported rows", () => {
+    let history = imported(Stats.emptyListeningHistory(), [
+      { ...row(0, "A", "B", 10), day: "2026-02-31" },
+      row(-5, "A", "B", 10),
+    ]);
     assert.deepStrictEqual(Object.keys(history.imported), []);
+    history = imported(history, [row(3, "A", "B", 10)]);
+    history = imported(history, [], day(1));
     assert.isNull(history.importedThrough);
   });
 
@@ -122,18 +123,21 @@ describe("listening history", () => {
     // T3 saw the export's song under another name; it must not add to the export's day.
     Stats.creditListening(stats, { ...credit(3, "ID1", "Artist", 90), name: "Song (Remastered)" });
     Stats.creditListening(stats, { ...credit(0, "ID1", "Artist", 30), name: "Song" });
-    const history = Stats.emptyListeningHistory();
+    let history = Stats.emptyListeningHistory();
     Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - 5 * DAY_MS);
     Stats.scanLibrary(history, [libraryTrack(2, NOW - 3 * DAY_MS)], NOW - 2 * DAY_MS);
     Stats.scanLibrary(history, [libraryTrack(4, NOW)], NOW);
-    importRows(history, [row(3, "Song", "Artist", 180), row(2, "Other", "Artist", 60)], day(2));
+    history = imported(
+      history,
+      [row(3, "Song", "Artist", 180), row(2, "Other", "Artist", 60)],
+      day(2),
+    );
 
     const week = Stats.summarizeListening(stats, history, 7, NOW);
-    // Day 3 is fully covered: the export (180) replaces the scan (200) and T3's 90.
+    // Days the export covers use it alone: not the scan (200) or T3's 90 on day 3.
     assert.strictEqual(week.days[3]!.seconds, 180);
-    // The export's last day may be partial, so it only wins if it saw more.
     assert.strictEqual(week.days[4]!.seconds, 60);
-    // Today: two scanned plays (400) cover T3's 30 seconds of the same song.
+    // Today, after the export: two scanned plays (400) cover T3's 30 seconds of the same song.
     assert.strictEqual(week.days[6]!.seconds, 400);
     assert.strictEqual(week.totalSec, 640);
     // T3's own samples still attribute projects.
@@ -141,54 +145,56 @@ describe("listening history", () => {
       { projectId: ProjectId.make("project-a"), seconds: 30 },
     ]);
 
-    Stats.clearImportedHistory(history);
-    const cleared = Stats.summarizeListening(stats, history, 7, NOW);
+    const cleared = Stats.summarizeListening(stats, Stats.withoutImportedHistory(history), 7, NOW);
     assert.strictEqual(cleared.days[3]!.seconds, 200);
     assert.isUndefined(cleared.importedThrough);
   });
 
   it("lets a stopped import hide nothing until its last chunk names the covered day", () => {
-    const history = Stats.emptyListeningHistory();
+    let history = Stats.emptyListeningHistory();
     Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - 3 * DAY_MS);
     Stats.scanLibrary(history, [libraryTrack(3, NOW - 2 * DAY_MS)], NOW - 2 * DAY_MS);
-    importRows(history, [row(3, "Song", "Artist", 50), row(2, "Song", "Artist", 30)]);
-    const stats = Stats.emptyListeningStats();
+    history = imported(history, [row(3, "Song", "Artist", 50), row(2, "Song", "Artist", 30)]);
     assert.isNull(history.importedThrough);
+    const stats = Stats.emptyListeningStats();
     assert.strictEqual(Stats.summarizeListening(stats, history, 7, NOW).days[4]!.seconds, 400);
-    importRows(history, [row(1, "Song", "Artist", 10)], day(1));
+    history = imported(history, [row(1, "Song", "Artist", 10)], day(1));
     assert.strictEqual(Stats.summarizeListening(stats, history, 7, NOW).days[4]!.seconds, 30);
   });
 
   it("credits library plays only after a baseline, and never for a new or reset track", () => {
     const history = Stats.emptyListeningHistory();
-    Stats.scanLibrary(history, [libraryTrack(10, NOW)], NOW);
+    const other = (count: number) => ({ ...libraryTrack(count, NOW), id: "0000000000000002" });
+    Stats.scanLibrary(history, [libraryTrack(10, NOW)], NOW - 30 * MINUTE_MS);
+    Stats.scanLibrary(history, [libraryTrack(3, NOW), other(7)], NOW - 15 * MINUTE_MS);
     assert.deepStrictEqual(history.synced, {});
-    Stats.scanLibrary(
-      history,
-      [libraryTrack(3, NOW), { ...libraryTrack(7, NOW), id: "0000000000000002" }],
-      NOW,
-    );
-    assert.deepStrictEqual(history.synced, {});
-    Stats.scanLibrary(
-      history,
-      [libraryTrack(4, null), { ...libraryTrack(8, NOW), id: "0000000000000002" }],
-      NOW,
-    );
-    assert.strictEqual(
-      Stats.summarizeListening(Stats.emptyListeningStats(), history, 1, NOW).totalSec,
-      400,
-    );
+    Stats.scanLibrary(history, [libraryTrack(4, null), other(8)], NOW);
+    assert.strictEqual(total(history, 1), 400);
+    // Nothing changed: no reason to rewrite the file.
+    assert.isFalse(Stats.scanLibrary(history, [libraryTrack(4, null), other(8)], NOW));
   });
 
-  it("credits no more plays than fit since the last scan", () => {
+  it("credits no more listening than fits since the last scan, across all songs", () => {
+    const tracks = (count: number) =>
+      Array.from({ length: 20 }, (_, index) => ({
+        ...libraryTrack(count, NOW),
+        id: String(index).padStart(16, "0"),
+      }));
     const history = Stats.emptyListeningHistory();
-    Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - 15 * 60 * 1000);
-    // An iCloud merge jumps the count by 50; 15 minutes holds five 200-second plays.
-    Stats.scanLibrary(history, [libraryTrack(51, NOW)], NOW);
-    assert.strictEqual(
-      Stats.summarizeListening(Stats.emptyListeningStats(), history, 1, NOW).totalSec,
-      1_000,
-    );
+    Stats.scanLibrary(history, tracks(1), NOW - 15 * MINUTE_MS);
+    // An iCloud merge bumps 20 songs; 15 minutes plus the song playing then holds 5 plays.
+    Stats.scanLibrary(history, tracks(2), NOW);
+    assert.strictEqual(total(history, 1), 1_000);
+  });
+
+  it("leaves plays on exported days to the export", () => {
+    let history = Stats.emptyListeningHistory();
+    Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - 2 * DAY_MS);
+    history = imported(history, [row(1, "Song", "Artist", 100)], day(1));
+    // Music was closed for days; the catch-up scan's last play falls on an exported day.
+    Stats.scanLibrary(history, [libraryTrack(9, NOW - DAY_MS)], NOW);
+    assert.deepStrictEqual(history.synced, {});
+    assert.strictEqual(total(history), 100);
   });
 });
 
@@ -260,10 +266,16 @@ describe("MusicListeningStats store", () => {
           // A directory where the file belongs fails every read.
           yield* fileSystem.makeDirectory(historyPath, { recursive: true });
           const store = yield* Stats.MusicListeningStats;
-          return yield* Effect.flip(store.importHistory({ rows }));
+          const error = yield* Effect.flip(
+            store.importHistory({ rows, coveredThrough: rows[0]!.day }),
+          );
+          // A failed save shows nothing it could not keep.
+          return { error, after: yield* store.summary({ days: 1 }) };
         }),
       );
-      assert.strictEqual(failure.operation, "import-history");
+      assert.strictEqual(failure.error.operation, "import-history");
+      assert.strictEqual(failure.after.totalSec, 0);
+      assert.isUndefined(failure.after.importedThrough);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
