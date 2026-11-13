@@ -141,7 +141,12 @@ function HistoryMenu(props: {
     }
     // Busy from the start, so a second pick can't run while a large file is read.
     onStatus({ _tag: "importing", percent: 0 });
-    const parsed = parseMusicHistoryCsv(await file.text());
+    const text = await file.text().catch(() => null);
+    if (text === null) {
+      onStatus({ _tag: "failed", message: "That file could not be read." });
+      return;
+    }
+    const parsed = parseMusicHistoryCsv(text);
     if (parsed._tag !== "parsed") {
       onStatus({
         _tag: "failed",

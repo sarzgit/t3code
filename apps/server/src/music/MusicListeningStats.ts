@@ -265,10 +265,14 @@ export function withImportedHistory(
     imported[day] = stored;
   }
   let importedThrough = file.importedThrough;
-  const covered = input.coveredThrough;
+  // A UTC-dated export can end on the local tomorrow; it covers through today at most.
+  const today = localDayKey(todayMs);
+  const covered =
+    input.coveredThrough === undefined || input.coveredThrough <= today
+      ? input.coveredThrough
+      : today;
   if (
     covered !== undefined &&
-    covered <= localDayKey(todayMs) &&
     (importedThrough === null || covered > importedThrough) &&
     Object.keys(imported).some((day) => day >= covered)
   ) {
@@ -281,6 +285,9 @@ export function withImportedHistory(
 export function withoutImportedHistory(file: ListeningHistoryFile): ListeningHistoryFile {
   return { ...file, imported: dictionary(), importedThrough: null };
 }
+
+const dayAfter = (day: string) =>
+  DateTime.formatIsoDateUtc(DateTime.add(DateTime.makeUnsafe(`${day}T00:00:00Z`), { days: 1 }));
 
 /**
  * When the export's last day ends. Apple may date by UTC or local time, so the later of the two
@@ -372,7 +379,11 @@ function mergeDay(
   const imported = Object.values(history.imported[date] ?? {});
   if (history.importedThrough !== null && date <= history.importedThrough) return imported;
   const local = Object.values(stats.days[date]?.tracks ?? {});
-  const synced = Object.values(history.synced[date] ?? {});
+  // Scans credited before the import can hold the export's UTC-dated plays on this day.
+  const synced =
+    history.importedThrough !== null && date === dayAfter(history.importedThrough)
+      ? []
+      : Object.values(history.synced[date] ?? {});
   return larger(larger(imported, synced), local);
 }
 

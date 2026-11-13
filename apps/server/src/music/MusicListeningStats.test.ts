@@ -117,6 +117,9 @@ describe("listening history", () => {
     history = imported(history, [row(3, "A", "B", 10)]);
     history = imported(history, [], day(1));
     assert.isNull(history.importedThrough);
+    // A UTC-dated export can end on the local tomorrow: it covers through today.
+    history = imported(history, [row(-1, "A", "B", 10)], day(-1));
+    assert.strictEqual(history.importedThrough, day(0));
   });
 
   it("counts a play once across T3 samples, the export and library scans", () => {
@@ -204,9 +207,21 @@ describe("listening history", () => {
     );
     assert.deepStrictEqual(history.synced, {});
     assert.strictEqual(total(history), 100);
-    // A later play, in a scan window wholly after the export, counts.
-    Stats.scanLibrary(history, [libraryTrack(5, NOW)], NOW);
-    assert.strictEqual(total(history), 300);
+    // A later play, in a scan window wholly after the export's UTC and local end, counts.
+    const later = NOW + DAY_MS;
+    Stats.scanLibrary(history, [libraryTrack(4, null)], later - 15 * MINUTE_MS);
+    Stats.scanLibrary(history, [libraryTrack(5, later)], later);
+    const week = Stats.summarizeListening(Stats.emptyListeningStats(), history, 7, later);
+    assert.strictEqual(week.totalSec, 300);
+  });
+
+  it("ignores scans on the day after the export, which may repeat its UTC-dated plays", () => {
+    let history = Stats.emptyListeningHistory();
+    Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - DAY_MS - 15 * MINUTE_MS);
+    Stats.scanLibrary(history, [libraryTrack(2, NOW - DAY_MS)], NOW - DAY_MS);
+    assert.strictEqual(total(history), 200);
+    history = imported(history, [row(2, "Song", "Artist", 100)], day(2));
+    assert.strictEqual(total(history), 100);
   });
 });
 
