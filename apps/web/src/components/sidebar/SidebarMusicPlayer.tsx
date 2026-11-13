@@ -1,31 +1,42 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  arrangeMusicPlaylists,
   formatMusicDuration,
   musicPositionAt,
   type ReceivedMusicState,
 } from "@t3tools/client-runtime/state/music";
-import type {
-  EnvironmentId,
-  MusicControlInput,
-  MusicPlayback,
-  MusicPlayerState,
-  MusicTrack,
+import {
+  AuthSettingsWriteScope,
+  type EnvironmentId,
+  type MusicControlInput,
+  type MusicPlayback,
+  type MusicPlayerState,
+  type MusicPlaylist,
+  type MusicPlaylistPlacement,
+  type MusicPlaylistPreferences,
+  type MusicTrack,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import {
   AudioLinesIcon,
+  EyeOffIcon,
   MusicIcon,
   PauseIcon,
+  PinIcon,
+  PinOffIcon,
   PlayIcon,
   ShuffleIcon,
   SkipBackIcon,
   SkipForwardIcon,
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 
 import { useNowSecond } from "~/hooks/useNowSecond";
 import { cn } from "~/lib/utils";
 import { musicEnvironment, useMusicEnvironmentId, useReceivedMusicState } from "~/state/music";
 import { useEnvironmentQuery } from "~/state/query";
+import { serverEnvironment } from "~/state/server";
+import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { Button } from "../ui/button";
@@ -316,6 +327,10 @@ function MusicPanel({
   );
 }
 
+const EMPTY_MUSIC_PLAYLIST_PREFERENCES: MusicPlaylistPreferences = { pinned: [], hidden: [] };
+const selectMusicPlaylistPreferences = (settings: ServerSettings | null) =>
+  settings?.musicPlaylists ?? EMPTY_MUSIC_PLAYLIST_PREFERENCES;
+
 function PlaylistList({
   environmentId,
   currentPlaylistId,
@@ -327,15 +342,122 @@ function PlaylistList({
 }) {
   const query = useEnvironmentQuery(musicEnvironment.playlists({ environmentId, input: {} }));
   const play = useAtomCommand(musicEnvironment.playPlaylist);
-  const [search, setSearch] = useState("");
-  const needle = search.trim().toLocaleLowerCase();
-  const playlists = (query.data?.playlists ?? []).filter(
-    (playlist) => needle === "" || playlist.name.toLocaleLowerCase().includes(needle),
+  const saveSettings = useAtomCommand(serverEnvironment.updateSettings);
+  const canArrange = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
+  const preferences = useAtomValue(
+    serverEnvironment.settingsValueAtom(environmentId),
+    selectMusicPlaylistPreferences,
   );
+  const [search, setSearch] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const library = query.data?.playlists ?? [];
+  const { pinned, listed, hidden } = arrangeMusicPlaylists(library, preferences, search);
+  const pinnedIds = new Set(preferences.pinned);
+
+  const place = (id: string, placement: MusicPlaylistPlacement) => {
+    // Remove and Restore move the row to the other list, so keep focus inside the popover.
+    const leavesList = placement === "hidden" || (placement === "listed" && !pinnedIds.has(id));
+    if (leavesList) searchRef.current?.focus();
+    void saveSettings({
+      environmentId,
+      input: { patch: { setMusicPlaylists: [{ id, placement }] } },
+    });
+  };
+
+  const renderRow = (playlist: MusicPlaylist) => {
+    const current = playlist.id === currentPlaylistId;
+    const isPinned = pinnedIds.has(playlist.id);
+    return (
+      <li
+        key={playlist.id}
+        className="group/playlist flex items-center rounded-md hover:bg-accent focus-within:bg-accent"
+      >
+        <button
+          type="button"
+          disabled={!controllable}
+          aria-current={current ? "true" : undefined}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60"
+          onClick={() => void play({ environmentId, input: { playlistId: playlist.id } })}
+        >
+          <span className={cn("min-w-0 flex-1 truncate", current && "font-medium")}>
+            {playlist.name}
+          </span>
+          {current ? <AudioLinesIcon className="size-3.5 shrink-0" aria-label="Playing" /> : null}
+          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+            {formatMusicDuration(playlist.durationSec)}
+          </span>
+        </button>
+        {canArrange ? (
+          <span className="flex shrink-0 items-center pe-1">
+            <span
+              className={cn(
+                "group/pin flex",
+                !isPinned &&
+                  "opacity-0 group-hover/playlist:opacity-100 group-focus-within/playlist:opacity-100 any-pointer-coarse:opacity-100",
+              )}
+            >
+              <Button
+                variant="ghost-muted"
+                size="icon-xs"
+                aria-label={`${isPinned ? "Unpin" : "Pin"} ${playlist.name}`}
+                aria-pressed={isPinned}
+                onClick={() => place(playlist.id, isPinned ? "listed" : "pinned")}
+              >
+                {isPinned ? (
+                  <>
+                    <PinIcon className="group-hover/pin:hidden" />
+                    <PinOffIcon className="hidden group-hover/pin:block" />
+                  </>
+                ) : (
+                  <PinIcon />
+                )}
+              </Button>
+            </span>
+            <span className="flex opacity-0 group-hover/playlist:opacity-100 group-focus-within/playlist:opacity-100 any-pointer-coarse:opacity-100">
+              <Button
+                variant="ghost-muted"
+                size="icon-xs"
+                aria-label={`Remove ${playlist.name} from list`}
+                onClick={() => place(playlist.id, "hidden")}
+              >
+                <EyeOffIcon />
+              </Button>
+            </span>
+          </span>
+        ) : null}
+      </li>
+    );
+  };
+
+  // One flat keyed array: pinning moves a row instead of remounting it, so focus stays on it.
+  const listItems = [
+    ...(pinned.length > 0
+      ? [
+          <li key="pinned-label" className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground">
+            Pinned
+          </li>,
+        ]
+      : []),
+    ...pinned.map(renderRow),
+    ...(pinned.length > 0 && listed.length > 0
+      ? [<li key="pinned-divider" aria-hidden className="mx-2 my-1 border-t border-border" />]
+      : []),
+    ...listed.map(renderRow),
+  ];
+
+  const needle = search.trim();
+  const emptyMessage =
+    needle !== ""
+      ? "No matches"
+      : library.length === 0
+        ? "No playlists in your library"
+        : "Every playlist is hidden";
 
   return (
     <div className="flex flex-col gap-2">
       <Input
+        ref={searchRef}
         type="search"
         size="sm"
         placeholder="Search playlists"
@@ -356,39 +478,52 @@ function PlaylistList({
             <Spinner />
           </div>
         )
-      ) : playlists.length === 0 ? (
-        <p className="py-2 text-center text-xs text-muted-foreground">
-          {needle === "" ? "No playlists in your library" : "No matches"}
-        </p>
       ) : (
-        <ScrollArea className="max-h-64" scrollFade>
-          <ul className="flex flex-col">
-            {playlists.map((playlist) => {
-              const current = playlist.id === currentPlaylistId;
-              return (
-                <li key={playlist.id}>
-                  <button
-                    type="button"
-                    disabled={!controllable}
-                    aria-current={current ? "true" : undefined}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60"
-                    onClick={() => void play({ environmentId, input: { playlistId: playlist.id } })}
-                  >
-                    <span className={cn("min-w-0 flex-1 truncate", current && "font-medium")}>
-                      {playlist.name}
-                    </span>
-                    {current ? (
-                      <AudioLinesIcon className="size-3.5 shrink-0" aria-label="Playing" />
-                    ) : null}
-                    <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                      {formatMusicDuration(playlist.durationSec)}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </ScrollArea>
+        <>
+          {pinned.length + listed.length === 0 ? (
+            <p className="py-2 text-center text-xs text-muted-foreground">{emptyMessage}</p>
+          ) : (
+            <ScrollArea className="max-h-64" scrollFade>
+              <ul className="flex flex-col" aria-label="Playlists">
+                {listItems}
+              </ul>
+            </ScrollArea>
+          )}
+          {canArrange && hidden.length > 0 ? (
+            <div className="flex flex-col gap-1 border-t border-border pt-1">
+              <Button
+                variant="ghost-muted"
+                size="xs"
+                aria-expanded={showHidden}
+                onClick={() => setShowHidden((open) => !open)}
+              >
+                Hidden ({hidden.length})
+              </Button>
+              {showHidden ? (
+                <ul
+                  className="flex max-h-40 flex-col overflow-y-auto"
+                  aria-label="Hidden playlists"
+                >
+                  {hidden.map((playlist) => (
+                    <li key={playlist.id} className="flex items-center gap-2 px-2 py-1 text-sm">
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                        {playlist.name}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        aria-label={`Restore ${playlist.name}`}
+                        onClick={() => place(playlist.id, "listed")}
+                      >
+                        Restore
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </>
       )}
     </div>
   );

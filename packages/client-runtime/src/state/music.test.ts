@@ -1,7 +1,7 @@
 import type { MusicPlayerState } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { musicPositionAt } from "./music.ts";
+import { arrangeMusicPlaylists, musicPositionAt } from "./music.ts";
 
 const ready = (
   overrides: Partial<Extract<MusicPlayerState, { _tag: "ready" }>> = {},
@@ -30,5 +30,31 @@ describe("musicPositionAt", () => {
   it("restarts from a new state after a seek or reconnect", () => {
     const seeked = { state: ready({ positionSec: 60 }), receivedAtMs: 20_000 };
     expect(musicPositionAt(seeked, 22_000)).toBe(62);
+  });
+});
+
+describe("arrangeMusicPlaylists", () => {
+  const playlist = (id: string, name: string) => ({ id, name, durationSec: 60 });
+  const a = playlist("AAAAAAAAAAAAAAAA", "Gym");
+  const b = playlist("BBBBBBBBBBBBBBBB", "Chill");
+  const c = playlist("CCCCCCCCCCCCCCCC", "Old gym mix");
+  const library = [a, b, c];
+  const names = (list: ReadonlyArray<{ name: string }>) => list.map(({ name }) => name);
+
+  it("puts pins first in pin order and skips ids missing from the library", () => {
+    const arranged = arrangeMusicPlaylists(
+      library,
+      { pinned: [c.id, "DDDDDDDDDDDDDDDD", a.id], hidden: [] },
+      "",
+    );
+    expect(names(arranged.pinned)).toEqual(["Old gym mix", "Gym"]);
+    expect(names(arranged.listed)).toEqual(["Chill"]);
+  });
+
+  it("searches pinned and listed playlists but always shows every hidden one", () => {
+    const arranged = arrangeMusicPlaylists(library, { pinned: [a.id], hidden: [b.id] }, "gym");
+    expect(names(arranged.pinned)).toEqual(["Gym"]);
+    expect(names(arranged.listed)).toEqual(["Old gym mix"]);
+    expect(names(arranged.hidden)).toEqual(["Chill"]);
   });
 });

@@ -23,6 +23,7 @@ import {
   ServerSettings,
   type ServerSettingsPatch,
   withIdleCompaction,
+  applyMusicPlaylistChanges,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -386,6 +387,7 @@ export function applyServerSettingsPatch(
     setModelFavorites,
     setModelsHidden,
     setProviderModelOrder,
+    setMusicPlaylists,
     providerModelPreferences,
     automaticGitFetchInterval,
     providerHealthRefreshInterval,
@@ -498,6 +500,9 @@ export function applyServerSettingsPatch(
     ...next,
     favorites,
     providerModelPreferences: nextModelPreferences,
+    ...(setMusicPlaylists?.length
+      ? { musicPlaylists: applyMusicPlaylistChanges(current.musicPlaylists, setMusicPlaylists) }
+      : {}),
     ...(worktreeCleanupPatch === undefined
       ? {}
       : {

@@ -883,6 +883,38 @@ describe("worktreesDirectory", () => {
   });
 });
 
+describe("music playlist preferences", () => {
+  const a = "AAAAAAAAAAAAAAAA";
+  const b = "BBBBBBBBBBBBBBBB";
+  const apply = (
+    current: ServerSettings,
+    ...changes: Array<{ id: string; placement: "pinned" | "listed" | "hidden" }>
+  ) => applyServerSettingsPatch(current, { setMusicPlaylists: changes }).musicPlaylists;
+
+  it("pins in order, keeps a re-pinned playlist in place, and hiding unpins", () => {
+    const pinned = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      setMusicPlaylists: [
+        { id: a, placement: "pinned" },
+        { id: b, placement: "pinned" },
+      ],
+    });
+    expect(pinned.musicPlaylists).toEqual({ pinned: [a, b], hidden: [] });
+    expect(apply(pinned, { id: a, placement: "pinned" })).toEqual({ pinned: [a, b], hidden: [] });
+    expect(apply(pinned, { id: a, placement: "hidden" })).toEqual({ pinned: [b], hidden: [a] });
+    expect(apply(pinned, { id: a, placement: "hidden" }, { id: a, placement: "listed" })).toEqual({
+      pinned: [b],
+      hidden: [],
+    });
+  });
+
+  it("drops malformed ids from a hand-edited file instead of resetting settings", () => {
+    const decoded = decodeServerSettings({
+      musicPlaylists: { pinned: [a, 42, "not-an-id"] },
+    });
+    expect(decoded.musicPlaylists).toEqual({ pinned: [a], hidden: [] });
+  });
+});
+
 describe("synchronized model preferences", () => {
   it("supports provider identifiers that match inherited object keys", () => {
     const provider = ProviderInstanceId.make("toString");

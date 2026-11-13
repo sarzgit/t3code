@@ -404,6 +404,26 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
       }),
   );
 
+  it.effect("saves and reloads pinned and hidden music playlists from the settings file", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const id = "3BA40D4A07B97011";
+      const saved = Effect.map(
+        Effect.flatMap(fs.readFileString(config.settingsPath), decodeServerSettingsJson),
+        (settings) => settings.musicPlaylists,
+      );
+
+      yield* service.updateSettings({ setMusicPlaylists: [{ id, placement: "pinned" }] });
+      assert.deepEqual(yield* saved, { pinned: [id], hidden: [] });
+      yield* service.updateSettings({ setMusicPlaylists: [{ id, placement: "hidden" }] });
+      assert.deepEqual(yield* saved, { pinned: [], hidden: [id] });
+      yield* service.updateSettings({ setMusicPlaylists: [{ id, placement: "listed" }] });
+      assert.deepEqual(yield* saved, { pinned: [], hidden: [] });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("deep merges nested settings updates without dropping siblings", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

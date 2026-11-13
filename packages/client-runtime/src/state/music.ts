@@ -1,4 +1,9 @@
-import { type MusicPlayerState, WS_METHODS } from "@t3tools/contracts";
+import {
+  type MusicPlayerState,
+  type MusicPlaylist,
+  type MusicPlaylistPreferences,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -68,4 +73,35 @@ export function formatMusicDuration(totalSeconds: number): string {
   const minutes = Math.floor((seconds % 3600) / 60);
   if (hours > 0) return `${hours} hr ${minutes} min`;
   return `${minutes} min`;
+}
+
+export interface ArrangedMusicPlaylists {
+  readonly pinned: ReadonlyArray<MusicPlaylist>;
+  readonly listed: ReadonlyArray<MusicPlaylist>;
+  /** Not searched: the restore view lists every hidden playlist. */
+  readonly hidden: ReadonlyArray<MusicPlaylist>;
+}
+
+/** Pinned in pin order, the rest in library order. Ids no longer in the library are skipped. */
+export function arrangeMusicPlaylists(
+  playlists: ReadonlyArray<MusicPlaylist>,
+  preferences: MusicPlaylistPreferences,
+  search: string,
+): ArrangedMusicPlaylists {
+  const needle = search.trim().toLocaleLowerCase();
+  const matches = (playlist: MusicPlaylist) =>
+    needle === "" || playlist.name.toLocaleLowerCase().includes(needle);
+  const byId = new Map(playlists.map((playlist) => [playlist.id, playlist]));
+  const pinnedIds = new Set(preferences.pinned);
+  const hiddenIds = new Set(preferences.hidden);
+  return {
+    pinned: preferences.pinned.flatMap((id) => {
+      const playlist = byId.get(id);
+      return playlist && !hiddenIds.has(id) && matches(playlist) ? [playlist] : [];
+    }),
+    listed: playlists.filter(
+      (playlist) => !pinnedIds.has(playlist.id) && !hiddenIds.has(playlist.id) && matches(playlist),
+    ),
+    hidden: playlists.filter((playlist) => hiddenIds.has(playlist.id)),
+  };
 }

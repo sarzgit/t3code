@@ -58,7 +58,9 @@ or turn shuffle on or off. The command palette also has **Music: Play/Pause**, *
 device.
 
 Only playlists in your Music library appear; add an Apple Music playlist to your library to play it
-here. The first time, macOS asks whether T3 Code may control Music. If you declined, allow it under
+here. Pin a playlist to keep it at the top of the list, or remove one you never play from T3 Code's
+list; **Hidden** at the bottom brings it back. These choices are saved on the Mac, so every device
+connected to it sees the same list, and Apple Music's own playlists never change. The first time, macOS asks whether T3 Code may control Music. If you declined, allow it under
 **System Settings → Privacy & Security → Automation**. Turn off **Music player** in
 **Settings → Appearance** to hide it.
 

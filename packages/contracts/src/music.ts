@@ -1,8 +1,66 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+
+const MUSIC_PERSISTENT_ID_PATTERN = /^[0-9A-F]{16}$/;
 
 /** Music app persistent ids are 16 hex digits. */
-export const MusicPersistentId = Schema.String.check(Schema.isPattern(/^[0-9A-F]{16}$/));
+export const MusicPersistentId = Schema.String.check(Schema.isPattern(MUSIC_PERSISTENT_ID_PATTERN));
 export type MusicPersistentId = typeof MusicPersistentId.Type;
+
+/** Bad entries drop alone, so a hand edit cannot reset the settings file. */
+const MusicPlaylistIdList = Schema.Array(Schema.Unknown).pipe(
+  Schema.decodeTo(
+    Schema.Array(MusicPersistentId),
+    SchemaTransformation.transform<ReadonlyArray<string>, ReadonlyArray<unknown>>({
+      decode: (values) =>
+        values.filter(
+          (value): value is string =>
+            typeof value === "string" && MUSIC_PERSISTENT_ID_PATTERN.test(value),
+        ),
+      encode: (values) => values,
+    }),
+  ),
+  Schema.withDecodingDefault(Effect.succeed([])),
+);
+
+/** Which library playlists T3 pins or hides. Apple Music itself is never changed. */
+export const MusicPlaylistPreferences = Schema.Struct({
+  pinned: MusicPlaylistIdList,
+  hidden: MusicPlaylistIdList,
+});
+export type MusicPlaylistPreferences = typeof MusicPlaylistPreferences.Type;
+
+export const MusicPlaylistPlacement = Schema.Literals(["pinned", "listed", "hidden"]);
+export type MusicPlaylistPlacement = typeof MusicPlaylistPlacement.Type;
+
+export const MusicPlaylistChange = Schema.Struct({
+  id: MusicPersistentId,
+  placement: MusicPlaylistPlacement,
+});
+export type MusicPlaylistChange = typeof MusicPlaylistChange.Type;
+
+/** Pinning keeps an already pinned playlist in place; hiding also unpins. */
+export function applyMusicPlaylistChanges(
+  current: MusicPlaylistPreferences,
+  changes: ReadonlyArray<MusicPlaylistChange>,
+): MusicPlaylistPreferences {
+  let pinned = [...current.pinned];
+  let hidden = [...current.hidden];
+  for (const { id, placement } of changes) {
+    if (placement === "pinned") {
+      hidden = hidden.filter((entry) => entry !== id);
+      if (!pinned.includes(id)) pinned.push(id);
+    } else if (placement === "hidden") {
+      pinned = pinned.filter((entry) => entry !== id);
+      if (!hidden.includes(id)) hidden.push(id);
+    } else {
+      pinned = pinned.filter((entry) => entry !== id);
+      hidden = hidden.filter((entry) => entry !== id);
+    }
+  }
+  return { pinned, hidden };
+}
 
 const MusicText = Schema.String.check(Schema.isMaxLength(500));
 
