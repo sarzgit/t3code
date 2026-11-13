@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as Stats from "./MusicListeningStats.ts";
@@ -191,10 +192,21 @@ describe("listening history", () => {
     let history = Stats.emptyListeningHistory();
     Stats.scanLibrary(history, [libraryTrack(1, null)], NOW - 2 * DAY_MS);
     history = imported(history, [row(1, "Song", "Artist", 100)], day(1));
-    // Music was closed for days; the catch-up scan's last play falls on an exported day.
-    Stats.scanLibrary(history, [libraryTrack(9, NOW - DAY_MS)], NOW);
+    // Music was closed across the export's end: the count holds exported plays, so a scan
+    // spanning that end only re-baselines, even though the last play came after it.
+    Stats.scanLibrary(history, [libraryTrack(3, NOW)], NOW - 30 * MINUTE_MS);
+    assert.deepStrictEqual(history.synced, {});
+    // Apple may date by UTC: a play just before the UTC end of the exported day is the export's.
+    Stats.scanLibrary(
+      history,
+      [libraryTrack(4, Date.parse(`${day(1)}T23:30:00Z`))],
+      NOW - 15 * MINUTE_MS,
+    );
     assert.deepStrictEqual(history.synced, {});
     assert.strictEqual(total(history), 100);
+    // A later play, in a scan window wholly after the export, counts.
+    Stats.scanLibrary(history, [libraryTrack(5, NOW)], NOW);
+    assert.strictEqual(total(history), 300);
   });
 });
 
@@ -296,6 +308,30 @@ describe("MusicListeningStats store", () => {
       yield* scan(1);
       // A fresh store reads the baseline back, so plays between runs still count.
       assert.strictEqual((yield* scan(2)).totalSec, 200);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("saves the scan clock at least hourly when counts stay the same", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-music-stats-" });
+      const savedScanAt = yield* withStore(
+        baseDir,
+        Effect.gen(function* () {
+          const store = yield* Stats.MusicListeningStats;
+          yield* store.scanLibrary([libraryTrack(1, 0)]);
+          yield* store.flush;
+          yield* TestClock.adjust("2 hours");
+          yield* store.scanLibrary([libraryTrack(1, 0)]);
+          yield* store.flush;
+          const config = yield* ServerConfig.ServerConfig;
+          const contents = yield* fileSystem.readFileString(
+            (yield* Path.Path).join(config.stateDir, "music-history.json"),
+          );
+          return (JSON.parse(contents) as { library: { scannedAtMs: number } }).library.scannedAtMs;
+        }),
+      );
+      assert.strictEqual(savedScanAt, 2 * 60 * 60 * 1000);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

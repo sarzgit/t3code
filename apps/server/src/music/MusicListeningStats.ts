@@ -108,6 +108,7 @@ const encodeHistoryFile = Schema.encodeEffect(Schema.fromJsonString(HistoryFile)
 export const RETAINED_DAYS = 400;
 const TOP_COUNT = 5;
 const DAY_SECONDS = 86_400;
+const SCAN_CLOCK_SAVE_MS = 60 * 60 * 1000;
 
 /** Keys are song, artist and project names, so "constructor" or "__proto__" must stay plain keys. */
 const dictionary = <A>(): Record<string, A> => Object.create(null);
@@ -267,6 +268,7 @@ export function withImportedHistory(
   const covered = input.coveredThrough;
   if (
     covered !== undefined &&
+    covered <= localDayKey(todayMs) &&
     (importedThrough === null || covered > importedThrough) &&
     Object.keys(imported).some((day) => day >= covered)
   ) {
@@ -278,6 +280,24 @@ export function withImportedHistory(
 /** Returns a new file without imported history; scans and the library baseline stay. */
 export function withoutImportedHistory(file: ListeningHistoryFile): ListeningHistoryFile {
   return { ...file, imported: dictionary(), importedThrough: null };
+}
+
+/**
+ * When the export's last day ends. Apple may date by UTC or local time, so the later of the two
+ * ends counts, and no play the export could hold is credited again.
+ */
+function exportCoveredUntilMs(importedThrough: string | null): number {
+  if (importedThrough === null) return -Infinity;
+  const [year, month, day] = importedThrough.split("-").map(Number);
+  const utcStart = DateTime.makeUnsafe(`${importedThrough}T00:00:00Z`);
+  const localStart = DateTime.makeZonedUnsafe(
+    { year: year!, month: month!, day: day! },
+    { timeZone: localZone, adjustForTimeZone: true },
+  );
+  return Math.max(
+    DateTime.toEpochMillis(DateTime.add(utcStart, { days: 1 })),
+    DateTime.toEpochMillis(DateTime.add(localStart, { days: 1 })),
+  );
 }
 
 /**
@@ -309,9 +329,13 @@ export function scanLibrary(
   const newestFirst = increased.toSorted(
     (left, right) => (right.playedAtMs ?? nowMs) - (left.playedAtMs ?? nowMs),
   );
+  const coveredUntilMs = exportCoveredUntilMs(file.importedThrough);
+  // A count that grew across the export's end mixes exported plays in; it only re-baselines.
+  if (previous.scannedAtMs < coveredUntilMs) return changed;
   for (const track of newestFirst) {
-    const day = localDayKey(track.playedAtMs ?? nowMs);
-    if (file.importedThrough !== null && day <= file.importedThrough) continue;
+    const playedAtMs = track.playedAtMs ?? nowMs;
+    if (playedAtMs < coveredUntilMs) continue;
+    const day = localDayKey(playedAtMs);
     const plays = Math.min(
       track.playedCount - previous.counts[track.id]!,
       Math.floor(budgetSec / track.durationSec),
@@ -338,6 +362,7 @@ const larger = (left: ReadonlyArray<SongSeconds>, right: ReadonlyArray<SongSecon
  * The export covers the whole account, so its days use it alone (it may date by UTC; mixing
  * local days in could count a midnight play twice). Later days take the source that saw most:
  * one play can sit in several under different names, so sources are never added together.
+ * T3's samples keep only local days, so the day after the export can repeat its UTC-offset hours.
  */
 function mergeDay(
   stats: ListeningStatsFile,
@@ -524,6 +549,9 @@ const make = Effect.gen(function* () {
     );
   });
 
+  // The scan clock bounds catch-up credit, so it reaches disk at least hourly even when
+  // nothing else changed; a restart then budgets from a recent scan.
+  let scanClockSavedAtMs = -Infinity;
   const scan = Effect.fn("MusicListeningStats.scanLibrary")(function* (
     tracks: ReadonlyArray<LibraryTrack>,
   ) {
@@ -531,7 +559,11 @@ const make = Effect.gen(function* () {
     yield* lock.withPermits(1)(
       history.load.pipe(
         Effect.map((file) => {
-          if (scanLibrary(file, tracks, now)) historyDirty = true;
+          const changed = scanLibrary(file, tracks, now);
+          if (changed || now - scanClockSavedAtMs >= SCAN_CLOCK_SAVE_MS) {
+            historyDirty = true;
+            scanClockSavedAtMs = now;
+          }
         }),
       ),
     );

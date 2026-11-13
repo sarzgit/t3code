@@ -139,6 +139,8 @@ function HistoryMenu(props: {
       onStatus({ _tag: "failed", message: "That file is too large to be the play history." });
       return;
     }
+    // Busy from the start, so a second pick can't run while a large file is read.
+    onStatus({ _tag: "importing", percent: 0 });
     const parsed = parseMusicHistoryCsv(await file.text());
     if (parsed._tag !== "parsed") {
       onStatus({
