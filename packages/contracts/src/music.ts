@@ -177,6 +177,7 @@ export const MusicStatsInput = Schema.Struct({ days: Schema.Literals([1, 7, 30])
 export type MusicStatsInput = typeof MusicStatsInput.Type;
 
 export const MusicStats = Schema.Struct({
+  /** T3's own samples, Apple's export, and library plays estimated at full song length. */
   totalSec: Schema.Number,
   /** One entry per day in the range, oldest first, in the server's local time. */
   days: Schema.Array(Schema.Struct({ date: Schema.String, seconds: Schema.Number })),

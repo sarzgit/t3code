@@ -231,6 +231,10 @@ function HistoryMenu(props: {
           >
             Remove imported history
           </MenuItem>
+          <MenuSeparator />
+          <MenuGroup>
+            <MenuGroupLabel>Library plays are estimated at full song length</MenuGroupLabel>
+          </MenuGroup>
         </MenuPopup>
       </Menu>
     </>
