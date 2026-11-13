@@ -27,7 +27,7 @@ import {
   Volume2Icon,
   VolumeXIcon,
 } from "lucide-react";
-import { type CSSProperties, memo, useRef, useState } from "react";
+import { type CSSProperties, memo, useEffect, useRef, useState } from "react";
 
 import { useNowSecond } from "~/hooks/useNowSecond";
 import { musicEnvironment, useMusicEnvironmentId, useReceivedMusicState } from "~/state/music";
@@ -154,9 +154,17 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
           received={withSeekAnchor(received, seekAnchor)}
           ready={ready}
           disabled={!controllable}
+          key={ready.track.id}
           onSeek={(positionSec) => {
-            setSeekAnchor({ positionSec, atMs: Date.now() });
-            send({ _tag: "seek", positionSec });
+            const anchor = { positionSec, atMs: Date.now() };
+            setSeekAnchor(anchor);
+            void runControl({ environmentId, input: { _tag: "seek", positionSec } }).then(
+              (result) => {
+                if (result._tag !== "Success") {
+                  setSeekAnchor((current) => (current === anchor ? null : current));
+                }
+              },
+            );
           }}
         />
       ) : null}
@@ -242,6 +250,13 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
 function useSettledCommit<T>(commit: (value: T) => void) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [draft, setDraft] = useState<T | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops a pending slider commit when the slider unmounts (track change, player hidden) so it cannot land on another song.
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    [],
+  );
   const change = (value: T) => {
     setDraft(value);
     if (timer.current !== null) clearTimeout(timer.current);

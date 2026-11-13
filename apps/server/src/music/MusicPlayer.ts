@@ -108,9 +108,14 @@ const PLAY_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
-  if (argv[1] === "shuffle-on") Music.shuffleEnabled = true;
-  if (argv[1] === "shuffle-off") Music.shuffleEnabled = false;
+  const applyShuffle = () => {
+    if (argv[1] === "shuffle-on") Music.shuffleEnabled = true;
+    if (argv[1] === "shuffle-off") Music.shuffleEnabled = false;
+  };
+  applyShuffle();
   found[0].play();
+  // Music ignores shuffle while an Autoplay song (no playlist) was current, so set it again.
+  applyShuffle();
   return "ok";
 }`;
 
