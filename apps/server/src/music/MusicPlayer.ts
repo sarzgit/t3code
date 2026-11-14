@@ -6,14 +6,21 @@ import {
   type MusicControlInput,
   type MusicImportHistoryInput,
   type MusicImportHistoryResult,
+  type MusicLibrarySearch,
+  type MusicLibrarySong,
   type MusicListTracksInput,
   type MusicPlayerState,
   type MusicPlaylists,
+  type MusicPlaylistTrack,
   type MusicPlaylistTracks,
   type MusicPlayPlaylistInput,
   type MusicPlayTrackInput,
+  type MusicSearchLibraryInput,
   type MusicStats,
   type MusicStatsInput,
+  type MusicUpNext,
+  type MusicUpNextInput,
+  MUSIC_LIBRARY_SEARCH_LIMIT,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cache from "effect/Cache";
@@ -47,6 +54,11 @@ export class MusicPlayer extends Context.Service<
       input: MusicListTracksInput,
     ) => Effect.Effect<MusicPlaylistTracks, MusicError>;
     readonly playTrack: (input: MusicPlayTrackInput) => Effect.Effect<void, MusicError>;
+    readonly searchLibrary: (
+      input: MusicSearchLibraryInput,
+    ) => Effect.Effect<MusicLibrarySearch, MusicError>;
+    /** The songs T3 Code will play after the one at `index`, as STEP_SCRIPT moves on. */
+    readonly upNext: (input: MusicUpNextInput) => Effect.Effect<MusicUpNext, MusicError>;
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
     readonly stats: (input: MusicStatsInput) => Effect.Effect<MusicStats, MusicError>;
@@ -201,18 +213,78 @@ const LIST_TRACKS_SCRIPT = `function run(argv) {
   return JSON.stringify({ total: ids.length, tracks: out });
 }`;
 
+// Appended after a script's run handler; function declarations hoist. The library also holds
+// videos and other media, so T3 moves through its songs only. Bulk-read positions do not always
+// match track specifiers (the library skips indexes), so a song is played by its id.
+const SONGS_JXA = `
+function songs(Music, playlist) {
+  const tracks = playlist.tracks;
+  const ids = tracks.persistentID();
+  if (playlist.persistentID() !== Music.libraryPlaylists[0].persistentID()) {
+    return { ids: ids, pick: (values) => values };
+  }
+  const kinds = tracks.mediaKind();
+  const keep = (_, i) => kinds[i] === "song";
+  return { ids: ids.filter(keep), pick: (values) => values.filter(keep) };
+}
+function playSong(playlist, id) {
+  playlist.tracks.whose({ persistentID: id })()[0].play();
+}`;
+
 // A song can appear more than once, so it is found by position, checked against its id.
 const PLAY_TRACK_SCRIPT = `function run(argv) {
-  const found = Application("Music").playlists.whose({ persistentID: argv[0] })();
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
-  const tracks = found[0].tracks;
-  const ids = tracks.persistentID();
+  const ids = songs(Music, found[0]).ids;
   const index = Number(argv[2]);
   const target = ids[index] === argv[1] ? index : ids.indexOf(argv[1]);
   if (target < 0) return "not-found";
-  tracks[target].play();
+  playSong(found[0], argv[1]);
   return "ok:" + target;
-}`;
+}${SONGS_JXA}`;
+
+// Reads the whole library once; the server filters it, so a query never reaches a script.
+const LIBRARY_SCRIPT = `function run() {
+  const Music = Application("Music");
+  const library = Music.libraryPlaylists[0];
+  const list = songs(Music, library);
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 300) : "");
+  return JSON.stringify({
+    playlistId: library.persistentID(),
+    ids: list.ids,
+    names: list.pick(library.tracks.name()).map(clip),
+    artists: list.pick(library.tracks.artist()).map(clip),
+    albums: list.pick(library.tracks.album()).map(clip),
+    durations: list.pick(library.tracks.duration()),
+  });
+}${SONGS_JXA}`;
+
+// Finds the current song the way STEP_SCRIPT does, so the list is what next will play.
+const UP_NEXT_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const list = songs(Music, found[0]);
+  const ids = list.ids;
+  const given = Number(argv[2]);
+  const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
+  if (current < 0) return "not-found";
+  const order = [];
+  for (let step = 1; step < ids.length && order.length < Number(argv[4]); step++) {
+    if (current + step >= ids.length && argv[3] !== "wrap") break;
+    order.push((current + step) % ids.length);
+  }
+  const tracks = found[0].tracks;
+  const names = order.length > 0 ? list.pick(tracks.name()) : [];
+  const artists = order.length > 0 ? list.pick(tracks.artist()) : [];
+  const durations = order.length > 0 ? list.pick(tracks.duration()) : [];
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 300) : "");
+  return JSON.stringify({
+    playlistName: clip(found[0].name()),
+    tracks: order.map((i) => ({ id: ids[i], index: i, name: clip(names[i]), artist: clip(artists[i]), durationSec: durations[i] })),
+  });
+}${SONGS_JXA}`;
 
 // Music plays a scripted song alone: at its end playback stops, and next or previous only
 // restart it. So the server moves through the playlist itself, one song at a time.
@@ -239,8 +311,7 @@ const STEP_SCRIPT = `function run(argv) {
     Music.shuffleEnabled = true;
     return "playlist";
   }
-  const tracks = found[0].tracks;
-  const ids = tracks.persistentID();
+  const ids = songs(Music, found[0]).ids;
   const given = Number(argv[2]);
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
@@ -253,9 +324,9 @@ const STEP_SCRIPT = `function run(argv) {
     }
     target = (target + ids.length) % ids.length;
   }
-  tracks[target].play();
+  playSong(found[0], ids[target]);
   return "ok:" + target + ":" + ids[target];
-}`;
+}${SONGS_JXA}`;
 
 const CONTROL_SCRIPT = `function run(argv) {
   const Music = Application("Music");
@@ -411,11 +482,114 @@ const RawTracks = Schema.Struct({
 const decodeRawTracks = Schema.decodeUnknownOption(Schema.fromJsonString(RawTracks));
 const MAX_PLAYLIST_TRACKS = 5_000;
 
+const RawLibrary = Schema.Struct({
+  playlistId: Schema.String,
+  ids: Schema.Array(Schema.NullOr(Schema.String)),
+  names: Schema.Array(Schema.NullOr(Schema.String)),
+  artists: Schema.Array(Schema.NullOr(Schema.String)),
+  albums: Schema.Array(Schema.NullOr(Schema.String)),
+  durations: Schema.Array(Schema.NullOr(Schema.Number)),
+});
+const decodeRawLibrary = Schema.decodeUnknownOption(Schema.fromJsonString(RawLibrary));
+const MAX_LIBRARY_BYTES = 32 * 1024 * 1024;
+/** Searches typed in a row share one read of the library. */
+const LIBRARY_SNAPSHOT_TTL = Duration.minutes(1);
+
+const RawUpNext = Schema.Struct({
+  playlistName: Schema.NullOr(Schema.String),
+  tracks: RawTracks.fields.tracks,
+});
+const decodeRawUpNext = Schema.decodeUnknownOption(Schema.fromJsonString(RawUpNext));
+const UP_NEXT_LIMIT = 25;
+
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
 const seconds = (value: number | null | undefined) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 const persistentId = (value: string | null | undefined) =>
   value !== undefined && value !== null && PERSISTENT_ID.test(value) ? value : null;
+
+const playlistTracks = (tracks: typeof RawTracks.Type.tracks): Array<MusicPlaylistTrack> =>
+  tracks.flatMap((track) => {
+    const id = persistentId(track.id);
+    return id === null || !Number.isInteger(track.index) || track.index < 0
+      ? []
+      : [
+          {
+            id,
+            index: track.index,
+            name: text(track.name),
+            artist: text(track.artist),
+            durationSec: seconds(track.durationSec),
+          },
+        ];
+  });
+
+/** Lowercase, without accents, with runs of whitespace collapsed. */
+const fold = (value: string) =>
+  value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+
+interface LibraryEntry {
+  readonly song: MusicLibrarySong;
+  readonly foldedName: string;
+  readonly foldedText: string;
+}
+
+interface MusicLibrarySnapshot {
+  readonly playlistId: string;
+  readonly entries: ReadonlyArray<LibraryEntry>;
+}
+
+/** One library read; a malformed row drops alone and the others keep their positions. */
+function decodeLibrarySnapshot(stdout: string): MusicLibrarySnapshot | null {
+  const raw = Option.getOrNull(decodeRawLibrary(stdout));
+  const playlistId = persistentId(raw?.playlistId);
+  if (raw === null || playlistId === null) return null;
+  const entries = raw.ids.flatMap((rawId, index): Array<LibraryEntry> => {
+    const id = persistentId(rawId);
+    if (id === null) return [];
+    const song = {
+      id,
+      index,
+      name: text(raw.names[index]),
+      artist: text(raw.artists[index]),
+      album: text(raw.albums[index]),
+      durationSec: seconds(raw.durations[index]),
+    };
+    return [
+      {
+        song,
+        foldedName: fold(song.name),
+        foldedText: fold(`${song.name} ${song.artist} ${song.album}`),
+      },
+    ];
+  });
+  return { playlistId, entries };
+}
+
+/** Every word must appear in a song's name, artist or album; name matches rank first. */
+function searchMusicLibrary(
+  snapshot: MusicLibrarySnapshot,
+  query: string,
+  limit: number,
+): MusicLibrarySearch {
+  const needle = fold(query);
+  const words = needle === "" ? [] : needle.split(" ");
+  const rank = (entry: LibraryEntry) =>
+    entry.foldedName.startsWith(needle) ? 0 : entry.foldedName.includes(needle) ? 1 : 2;
+  const matches =
+    words.length === 0
+      ? []
+      : snapshot.entries.filter((entry) => words.every((word) => entry.foldedText.includes(word)));
+  return {
+    playlistId: snapshot.playlistId,
+    songs: matches
+      .map((entry) => ({ entry, rank: rank(entry) }))
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, limit)
+      .map(({ entry }) => entry.song),
+    total: matches.length,
+  };
+}
 
 /** Turns one watcher line into a player state; null for a line that is not a sample. */
 export function decodeWatchLine(line: string): MusicPlayerState | null {
@@ -473,7 +647,8 @@ export function musicStateChanged(
     before.volume !== next.volume ||
     before.repeat !== next.repeat ||
     before.playlistId !== next.playlistId ||
-    JSON.stringify(before.track) !== JSON.stringify(next.track)
+    JSON.stringify(before.track) !== JSON.stringify(next.track) ||
+    JSON.stringify(before.playingFrom) !== JSON.stringify(next.playingFrom)
   ) {
     return true;
   }
@@ -491,6 +666,8 @@ export interface PickedSong {
   readonly startedAtMs: number;
   /** False until the watcher reports the song; Music takes a moment to switch. */
   readonly seen: boolean;
+  /** The playlist Music first reported for the song; another one means Music took over. */
+  readonly musicPlaylistId: string | null;
   readonly positionSec: number;
   readonly durationSec: number;
 }
@@ -510,6 +687,7 @@ export const pickSong = (
   index,
   startedAtMs,
   seen: false,
+  musicPlaylistId: null,
   positionSec: 0,
   durationSec: 0,
 });
@@ -543,6 +721,14 @@ export function followPickedSong(
   if (track === null)
     return nearEnd ? { _tag: "advance" } : { _tag: "follow", picked, hide: false };
   if (track.id !== picked.trackId) return { _tag: "drop" };
+  // The same song started from another playlist, album or Autoplay is Music's queue now.
+  if (
+    picked.musicPlaylistId !== null &&
+    state.playlistId !== null &&
+    state.playlistId !== picked.musicPlaylistId
+  ) {
+    return { _tag: "drop" };
+  }
   // With repeat all, Music loops a lone song instead of stopping.
   if (
     nearEnd &&
@@ -557,6 +743,7 @@ export function followPickedSong(
     picked: {
       ...picked,
       seen: true,
+      musicPlaylistId: picked.musicPlaylistId ?? state.playlistId,
       positionSec: state.positionSec,
       durationSec: track.durationSec,
     },
@@ -689,31 +876,37 @@ const make = Effect.gen(function* () {
     return outcome;
   });
 
-  /** Whether to hold back this sample from subscribers. */
+  /** The sample to publish, with where T3 is playing from; null holds it back. */
   const followSample = (state: MusicPlayerState, version: number) =>
     pickLock.withPermits(1)(
       Effect.gen(function* () {
-        if (version !== sampleVersion) return true;
+        if (version !== sampleVersion) return null;
         const current = yield* Ref.get(picked);
-        if (current === null) return false;
+        if (current === null) return state;
         const decision = followPickedSong(current, state, yield* Clock.currentTimeMillis);
         switch (decision._tag) {
-          case "follow":
+          case "follow": {
             yield* Ref.set(picked, decision.picked);
-            return decision.hide;
+            if (decision.hide) return null;
+            const { seen, trackId, playlistId, index } = decision.picked;
+            return seen && state._tag === "ready" && state.track?.id === trackId
+              ? { ...state, playingFrom: { playlistId, index } }
+              : state;
+          }
           case "drop":
             yield* Ref.set(picked, null);
-            return false;
+            return state;
           case "advance":
             yield* stepPicked(current, "advance").pipe(Effect.catch(() => Ref.set(picked, null)));
-            return true;
+            return null;
         }
       }),
     );
 
   // Per-sample work, about once a second while anyone watches; the watcher run owns the span.
-  const update = Effect.fnUntraced(function* (state: MusicPlayerState, version = sampleVersion) {
-    if (yield* followSample(state, version)) return;
+  const update = Effect.fnUntraced(function* (sample: MusicPlayerState, version = sampleVersion) {
+    const state = yield* followSample(sample, version);
+    if (state === null) return;
     yield* updateLock.withPermits(1)(
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
@@ -856,20 +1049,7 @@ const make = Effect.gen(function* () {
     }
     return {
       total: Math.max(0, Math.floor(raw.total)),
-      tracks: raw.tracks.flatMap((track) => {
-        const id = persistentId(track.id);
-        return id === null || !Number.isInteger(track.index) || track.index < 0
-          ? []
-          : [
-              {
-                id,
-                index: track.index,
-                name: text(track.name),
-                artist: text(track.artist),
-                durationSec: seconds(track.durationSec),
-              },
-            ];
-      }),
+      tracks: playlistTracks(raw.tracks),
     } satisfies MusicPlaylistTracks;
   });
 
@@ -894,6 +1074,52 @@ const make = Effect.gen(function* () {
       ),
     );
   }, pickLock.withPermits(1));
+
+  const readLibrary = Effect.fn("MusicPlayer.readLibrary")(function* () {
+    const result = yield* runScript(
+      "search-library",
+      "JavaScript",
+      LIBRARY_SCRIPT,
+      [],
+      MAX_LIBRARY_BYTES,
+    );
+    const snapshot = decodeLibrarySnapshot(result);
+    if (snapshot === null) {
+      return yield* new MusicError({ operation: "search-library", reason: "unavailable" });
+    }
+    return snapshot;
+  });
+
+  const librarySnapshot = yield* Cache.makeWith((_: "library") => readLibrary(), {
+    capacity: 1,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? LIBRARY_SNAPSHOT_TTL : Duration.zero),
+  });
+
+  const searchLibrary = Effect.fn("MusicPlayer.searchLibrary")(function* (
+    input: MusicSearchLibraryInput,
+  ) {
+    const snapshot = yield* Cache.get(librarySnapshot, "library");
+    return searchMusicLibrary(snapshot, input.query, MUSIC_LIBRARY_SEARCH_LIMIT);
+  });
+
+  const upNext = Effect.fn("MusicPlayer.upNext")(function* (input: MusicUpNextInput) {
+    const result = yield* runScript("up-next", "JavaScript", UP_NEXT_SCRIPT, [
+      input.playlistId,
+      input.trackId,
+      String(input.index),
+      input.wrap ? "wrap" : "stop",
+      String(UP_NEXT_LIMIT),
+    ]);
+    if (result === "not-found") {
+      return yield* new MusicError({ operation: "up-next", reason: "not-found" });
+    }
+    const raw = Option.getOrNull(decodeRawUpNext(result));
+    if (raw === null) return yield* new MusicError({ operation: "up-next", reason: "unavailable" });
+    return {
+      playlistName: text(raw.playlistName),
+      tracks: playlistTracks(raw.tracks),
+    } satisfies MusicUpNext;
+  });
 
   const controlArgs = (input: MusicControlInput): ReadonlyArray<string> => {
     switch (input._tag) {
@@ -1044,6 +1270,8 @@ const make = Effect.gen(function* () {
     playPlaylist,
     listTracks,
     playTrack,
+    searchLibrary,
+    upNext,
     control,
     artwork,
     stats: Effect.fn("MusicPlayer.stats")(function* (input: MusicStatsInput) {

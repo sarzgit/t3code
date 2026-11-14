@@ -5,6 +5,7 @@ import {
   type MusicPlaylist,
   type MusicPlaylistPreferences,
   type MusicRepeatMode,
+  type MusicUpNextInput,
   WS_METHODS,
 } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
@@ -51,6 +52,20 @@ export function createMusicEnvironmentAtoms<R, E>(
       tag: WS_METHODS.musicListTracks,
       staleTimeMs: 30_000,
       idleTtlMs: 60_000,
+    }),
+    // The server reads the library once a minute and filters it, so each query is cheap.
+    librarySearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:library-search",
+      tag: WS_METHODS.musicSearchLibrary,
+      staleTimeMs: 60_000,
+      idleTtlMs: 60_000,
+    }),
+    // Keyed by the current song and position, so a new song asks again; a reopened tab re-reads.
+    upNext: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:up-next",
+      tag: WS_METHODS.musicGetUpNext,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     // Opening the Stats tab re-reads; the server buffers a minute of listening before writing.
     stats: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -155,6 +170,30 @@ export function formatTrackTime(totalSeconds: number): string {
   const minutes = Math.floor((seconds % 3600) / 60);
   const rest = String(seconds % 60).padStart(2, "0");
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
+}
+
+export type MusicUpNextSource =
+  | { readonly _tag: "nothing-playing" }
+  /** Music runs its own queue (a whole playlist, shuffle, Autoplay) and does not share it. */
+  | { readonly _tag: "music-queue" }
+  | { readonly _tag: "known"; readonly input: MusicUpNextInput; readonly repeatsSong: boolean };
+
+/** Up Next is only listed while T3 Code moves through a playlist itself and shuffle is off. */
+export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
+  if (state._tag !== "ready" || state.track === null || state.playback === "stopped") {
+    return { _tag: "nothing-playing" };
+  }
+  if (state.shuffle || state.playingFrom === undefined) return { _tag: "music-queue" };
+  return {
+    _tag: "known",
+    input: {
+      playlistId: state.playingFrom.playlistId,
+      trackId: state.track.id,
+      index: state.playingFrom.index,
+      wrap: state.repeat === "all",
+    },
+    repeatsSong: state.repeat === "one",
+  };
 }
 
 export function nextRepeatMode(mode: MusicRepeatMode): MusicRepeatMode {

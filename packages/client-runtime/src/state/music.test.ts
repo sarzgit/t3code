@@ -5,6 +5,7 @@ import {
   arrangeMusicPlaylists,
   formatTrackTime,
   musicPositionAt,
+  musicUpNextSource,
   nextRepeatMode,
   parseMusicHistoryCsv,
   withSeekAnchor,
@@ -37,6 +38,38 @@ describe("musicPositionAt", () => {
   it("restarts from a new state after a seek or reconnect", () => {
     const seeked = { state: ready({ positionSec: 60 }), receivedAtMs: 20_000 };
     expect(musicPositionAt(seeked, 22_000)).toBe(62);
+  });
+});
+
+describe("musicUpNextSource", () => {
+  const playingFrom = { playlistId: "5CA38D01224697B3", index: 4 };
+  it.each([
+    ["nothing when stopped", ready({ playback: "stopped", playingFrom }), "nothing-playing"],
+    ["nothing without a song", ready({ track: null }), "nothing-playing"],
+    [
+      "Music's queue for a whole playlist",
+      ready({ playlistId: playingFrom.playlistId }),
+      "music-queue",
+    ],
+    ["Music's queue under shuffle", ready({ playingFrom, shuffle: true }), "music-queue"],
+    ["known while T3 steps", ready({ playingFrom, playback: "paused" }), "known"],
+  ] as const)("%s", (_name, state, expected) => {
+    expect(musicUpNextSource(state)._tag).toBe(expected);
+  });
+
+  it("wraps only under repeat all and flags repeat one", () => {
+    expect(musicUpNextSource(ready({ playingFrom, repeat: "all" }))).toEqual({
+      _tag: "known",
+      input: {
+        playlistId: playingFrom.playlistId,
+        trackId: "3BA40D4A07B97011",
+        index: 4,
+        wrap: true,
+      },
+      repeatsSong: false,
+    });
+    const once = musicUpNextSource(ready({ playingFrom, repeat: "one" }));
+    expect(once._tag === "known" && [once.input.wrap, once.repeatsSong]).toEqual([false, true]);
   });
 });
 

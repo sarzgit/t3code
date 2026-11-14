@@ -1,9 +1,11 @@
 import { LegendList } from "@legendapp/list/react";
 import { useAtomValue } from "@effect/atom-react";
+import { useDebouncedValue } from "@tanstack/react-pacer";
 import {
   arrangeMusicPlaylists,
   formatMusicDuration,
   formatTrackTime,
+  musicUpNextSource,
 } from "@t3tools/client-runtime/state/music";
 import {
   AuthSettingsWriteScope,
@@ -25,6 +27,7 @@ import {
   PinIcon,
   PinOffIcon,
   PlayIcon,
+  Repeat1Icon,
   ShuffleIcon,
 } from "lucide-react";
 import { useRef, useState } from "react";
@@ -71,6 +74,7 @@ export function MusicArtwork({
 type PanelView =
   | { readonly kind: "playlists"; readonly returnFocusTo: string | null }
   | { readonly kind: "songs"; readonly playlist: MusicPlaylist }
+  | { readonly kind: "up-next" }
   | { readonly kind: "stats" };
 
 /** Popover content: what is playing, then playlists or one playlist's songs. */
@@ -124,15 +128,19 @@ export function MusicPanel({
           value={[view.kind]}
           onValueChange={(next) => {
             if (next[0] === "stats") setView({ kind: "stats" });
+            else if (next[0] === "up-next") setView({ kind: "up-next" });
             else if (next[0] === "playlists") setView({ kind: "playlists", returnFocusTo: null });
           }}
         >
           <Toggle value="playlists">Playlists</Toggle>
+          <Toggle value="up-next">Up Next</Toggle>
           <Toggle value="stats">Stats</Toggle>
         </ToggleGroup>
       ) : null}
       {view.kind === "stats" ? (
         <ListeningStats environmentId={environmentId} />
+      ) : view.kind === "up-next" ? (
+        <UpNext environmentId={environmentId} state={state} />
       ) : view.kind === "songs" ? (
         <PlaylistSongs
           environmentId={environmentId}
@@ -145,6 +153,8 @@ export function MusicPanel({
         <PlaylistList
           environmentId={environmentId}
           currentPlaylistId={ready?.playlistId ?? null}
+          playingTrackId={track?.id ?? null}
+          controllable={controllable}
           search={playlistSearch}
           onSearchChange={setPlaylistSearch}
           returnFocusTo={view.returnFocusTo}
@@ -198,6 +208,39 @@ function FavoriteButton({
   );
 }
 
+/** One song's name, detail and length; rows add the button or list semantics. */
+function SongLine({
+  name,
+  detail,
+  durationSec,
+  playing,
+}: {
+  name: string;
+  detail: string;
+  durationSec: number;
+  playing: boolean;
+}) {
+  return (
+    <>
+      <span className="min-w-0 flex-1 leading-tight">
+        <span className={cn("block truncate text-sm", playing && "font-medium")}>
+          {name || "Untitled"}
+        </span>
+        {detail ? (
+          <span className="block truncate text-xs text-muted-foreground">{detail}</span>
+        ) : null}
+      </span>
+      {playing ? <AudioLinesIcon className="size-3.5 shrink-0" aria-label="Playing" /> : null}
+      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+        {formatTrackTime(durationSec)}
+      </span>
+    </>
+  );
+}
+
+const SONG_BUTTON_CLASS =
+  "flex h-11 w-full items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60";
+
 const SONG_ROW_HEIGHT = 44;
 const SONG_LIST_MAX_HEIGHT = 288;
 
@@ -240,7 +283,7 @@ function PlaylistSongs({
         type="button"
         disabled={!playable}
         aria-current={playing ? "true" : undefined}
-        className="flex h-11 w-full items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60"
+        className={SONG_BUTTON_CLASS}
         onClick={() =>
           void playTrack({
             environmentId,
@@ -248,18 +291,12 @@ function PlaylistSongs({
           })
         }
       >
-        <span className="min-w-0 flex-1 leading-tight">
-          <span className={cn("block truncate text-sm", playing && "font-medium")}>
-            {song.name || "Untitled"}
-          </span>
-          {song.artist ? (
-            <span className="block truncate text-xs text-muted-foreground">{song.artist}</span>
-          ) : null}
-        </span>
-        {playing ? <AudioLinesIcon className="size-3.5 shrink-0" aria-label="Playing" /> : null}
-        <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-          {formatTrackTime(song.durationSec)}
-        </span>
+        <SongLine
+          name={song.name}
+          detail={song.artist}
+          durationSec={song.durationSec}
+          playing={playing}
+        />
       </button>
     );
   };
@@ -313,22 +350,9 @@ function PlaylistSongs({
         onChange={(event) => setSearch(event.currentTarget.value)}
       />
       {query.data === null ? (
-        query.error ? (
-          <div className="flex items-center justify-between gap-2 py-1 text-xs text-muted-foreground">
-            <span>{query.error}</span>
-            <Button variant="outline" size="xs" onClick={query.refresh}>
-              Retry
-            </Button>
-          </div>
-        ) : (
-          <div className="flex justify-center py-3">
-            <Spinner />
-          </div>
-        )
+        <QueryProblem error={query.error} onRetry={query.refresh} />
       ) : songs.length === 0 ? (
-        <p className="py-2 text-center text-xs text-muted-foreground">
-          {needle === "" ? "No songs" : "No matches"}
-        </p>
+        <p className={EMPTY_TEXT_CLASS}>{needle === "" ? "No songs" : "No matches"}</p>
       ) : (
         <div
           className="relative w-full overflow-hidden"
@@ -360,13 +384,160 @@ function PlaylistSongs({
   );
 }
 
+/** Library search runs once typing pauses for this long. */
+const SONG_SEARCH_WAIT_MS = 250;
+
 const EMPTY_MUSIC_PLAYLIST_PREFERENCES: MusicPlaylistPreferences = { pinned: [], hidden: [] };
 const selectMusicPlaylistPreferences = (settings: ServerSettings | null) =>
   settings?.musicPlaylists ?? EMPTY_MUSIC_PLAYLIST_PREFERENCES;
 
+const EMPTY_TEXT_CLASS = "py-2 text-center text-xs text-muted-foreground";
+
+function QueryProblem({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  return error ? (
+    <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs text-muted-foreground">
+      <span>{error}</span>
+      <Button variant="outline" size="xs" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  ) : (
+    <div className="flex justify-center py-3">
+      <Spinner />
+    </div>
+  );
+}
+
+/** Library songs for a search; null while the typed query settles. */
+function LibrarySongs({
+  environmentId,
+  query,
+  playingTrackId,
+  controllable,
+  afterPlaylists,
+}: {
+  environmentId: EnvironmentId;
+  query: string | null;
+  playingTrackId: string | null;
+  controllable: boolean;
+  afterPlaylists: boolean;
+}) {
+  const result = useEnvironmentQuery(
+    query === null ? null : musicEnvironment.librarySearch({ environmentId, input: { query } }),
+  );
+  const playTrack = useAtomCommand(musicEnvironment.playTrack);
+  const canPlay = useAtomValue(musicEnvironment.playTrack.permissionAtom(environmentId));
+  const playable = controllable && canPlay;
+  if (query === null || result.data === null) {
+    return <QueryProblem error={query === null ? null : result.error} onRetry={result.refresh} />;
+  }
+  const { playlistId, songs, total } = result.data;
+  if (songs.length === 0) {
+    return afterPlaylists ? null : <p className={EMPTY_TEXT_CLASS}>No matches</p>;
+  }
+  return (
+    <section
+      aria-label="Songs"
+      className={cn("flex flex-col", afterPlaylists && "mt-1 border-t border-border pt-1")}
+    >
+      <p className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground">Songs</p>
+      <ul className="flex flex-col">
+        {songs.map((song) => (
+          <li key={song.id}>
+            <button
+              type="button"
+              disabled={!playable}
+              aria-current={song.id === playingTrackId ? "true" : undefined}
+              className={SONG_BUTTON_CLASS}
+              // The library is the context: next and previous move through it, not the results.
+              onClick={() =>
+                void playTrack({
+                  environmentId,
+                  input: { playlistId, trackId: song.id, index: song.index },
+                })
+              }
+            >
+              <SongLine
+                name={song.name}
+                detail={[song.artist, song.album].filter(Boolean).join(" · ")}
+                durationSec={song.durationSec}
+                playing={song.id === playingTrackId}
+              />
+            </button>
+          </li>
+        ))}
+      </ul>
+      {total > songs.length ? (
+        <p className="px-2 pt-1 text-xs text-muted-foreground">
+          First {songs.length} of {total.toLocaleString()} songs
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function UpNext({
+  environmentId,
+  state,
+}: {
+  environmentId: EnvironmentId;
+  state: MusicPlayerState;
+}) {
+  const source = musicUpNextSource(state);
+  const query = useEnvironmentQuery(
+    source._tag === "known"
+      ? musicEnvironment.upNext({ environmentId, input: source.input })
+      : null,
+  );
+  if (source._tag === "nothing-playing") return <p className={EMPTY_TEXT_CLASS}>Nothing playing</p>;
+  if (source._tag === "music-queue") {
+    const shuffled = state._tag === "ready" && state.shuffle;
+    return (
+      <div className={cn(EMPTY_TEXT_CLASS, "flex flex-col gap-0.5")}>
+        <p>
+          {shuffled ? "Music doesn't share its shuffle order." : "Music doesn't share its queue."}
+        </p>
+        {shuffled ? null : <p>Play a song from a playlist or search to see what's next.</p>}
+      </div>
+    );
+  }
+  if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
+  const { playlistName, tracks } = query.data;
+  const label = `${tracks.length === 0 ? "Last song in" : "Next in"} ${playlistName || "playlist"}`;
+  return (
+    <div className="flex flex-col gap-1">
+      <p className="truncate px-2 text-xs text-muted-foreground">{label}</p>
+      {source.repeatsSong ? (
+        <p className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
+          <Repeat1Icon className="size-3.5 shrink-0" aria-hidden />
+          This song repeats
+        </p>
+      ) : null}
+      {tracks.length > 0 ? (
+        <ScrollArea className="max-h-64" scrollFade>
+          <ol className="flex flex-col" aria-label={label}>
+            {tracks.map((song) => (
+              <li key={`${song.id}:${song.index}`} className="flex h-11 items-center gap-2 px-2">
+                <SongLine
+                  name={song.name}
+                  detail={song.artist}
+                  durationSec={song.durationSec}
+                  playing={false}
+                />
+              </li>
+            ))}
+          </ol>
+        </ScrollArea>
+      ) : null}
+    </div>
+  );
+}
+
 function PlaylistList({
   environmentId,
   currentPlaylistId,
+  playingTrackId,
+  controllable,
   search,
   onSearchChange,
   returnFocusTo,
@@ -374,6 +545,8 @@ function PlaylistList({
 }: {
   environmentId: EnvironmentId;
   currentPlaylistId: string | null;
+  playingTrackId: string | null;
+  controllable: boolean;
   search: string;
   onSearchChange: (search: string) => void;
   /** The playlist whose song view just closed; its row takes focus back. */
@@ -491,12 +664,15 @@ function PlaylistList({
   ];
 
   const needle = search.trim();
+  const [settledNeedle] = useDebouncedValue(needle, { wait: SONG_SEARCH_WAIT_MS });
   const emptyMessage =
-    needle !== ""
-      ? "No matches"
-      : library.length === 0
-        ? "No playlists in your library"
-        : "Every playlist is hidden";
+    library.length === 0 ? "No playlists in your library" : "Every playlist is hidden";
+  const playlistRows =
+    listItems.length > 0 ? (
+      <ul className="flex flex-col" aria-label="Playlists">
+        {listItems}
+      </ul>
+    ) : null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -504,33 +680,31 @@ function PlaylistList({
         ref={searchRef}
         type="search"
         size="sm"
-        placeholder="Search playlists"
-        aria-label="Search playlists"
+        placeholder="Search playlists and songs"
+        aria-label="Search playlists and songs"
         value={search}
         onChange={(event) => onSearchChange(event.currentTarget.value)}
       />
       {query.data === null ? (
-        query.error ? (
-          <div className="flex items-center justify-between gap-2 py-1 text-xs text-muted-foreground">
-            <span>{query.error}</span>
-            <Button variant="outline" size="xs" onClick={query.refresh}>
-              Retry
-            </Button>
-          </div>
-        ) : (
-          <div className="flex justify-center py-3">
-            <Spinner />
-          </div>
-        )
+        <QueryProblem error={query.error} onRetry={query.refresh} />
       ) : (
         <>
-          {pinned.length + listed.length === 0 ? (
-            <p className="py-2 text-center text-xs text-muted-foreground">{emptyMessage}</p>
+          {needle !== "" ? (
+            <ScrollArea className="max-h-72" scrollFade>
+              {playlistRows}
+              <LibrarySongs
+                environmentId={environmentId}
+                query={settledNeedle === needle ? needle : null}
+                playingTrackId={playingTrackId}
+                controllable={controllable}
+                afterPlaylists={playlistRows !== null}
+              />
+            </ScrollArea>
+          ) : playlistRows === null ? (
+            <p className={EMPTY_TEXT_CLASS}>{emptyMessage}</p>
           ) : (
             <ScrollArea className="max-h-64" scrollFade>
-              <ul className="flex flex-col" aria-label="Playlists">
-                {listItems}
-              </ul>
+              {playlistRows}
             </ScrollArea>
           )}
           {canArrange && hidden.length > 0 ? (

@@ -101,6 +101,13 @@ export const MusicPlayerState = Schema.Union([
     // Optional so a client still reads a server from before these controls.
     volume: Schema.optionalKey(MusicVolume),
     repeat: Schema.optionalKey(MusicRepeatMode),
+    /** Set while T3 Code moves through a playlist itself: where the current song sits in it. */
+    playingFrom: Schema.optionalKey(
+      Schema.Struct({
+        playlistId: MusicPersistentId,
+        index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      }),
+    ),
   }),
 ]);
 export type MusicPlayerState = typeof MusicPlayerState.Type;
@@ -148,6 +155,49 @@ export const MusicPlayTrackInput = Schema.Struct({
   index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
 export type MusicPlayTrackInput = typeof MusicPlayTrackInput.Type;
+
+export const MUSIC_LIBRARY_SEARCH_LIMIT = 50;
+
+export const MusicSearchLibraryInput = Schema.Struct({
+  query: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+});
+export type MusicSearchLibraryInput = typeof MusicSearchLibraryInput.Type;
+
+export const MusicLibrarySong = Schema.Struct({
+  id: MusicPersistentId,
+  /** Position among the library's songs; play it with the library's `playlistId`. */
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  name: MusicText,
+  artist: MusicText,
+  album: MusicText,
+  durationSec: Schema.Number,
+});
+export type MusicLibrarySong = typeof MusicLibrarySong.Type;
+
+export const MusicLibrarySearch = Schema.Struct({
+  /** The library playlist the songs belong to. */
+  playlistId: MusicPersistentId,
+  songs: Schema.Array(MusicLibrarySong),
+  /** Every match; more than `songs.length` when the list was capped. */
+  total: Schema.Int,
+});
+export type MusicLibrarySearch = typeof MusicLibrarySearch.Type;
+
+export const MusicUpNextInput = Schema.Struct({
+  playlistId: MusicPersistentId,
+  trackId: MusicPersistentId,
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Repeat all: continue from the top after the last song. */
+  wrap: Schema.Boolean,
+});
+export type MusicUpNextInput = typeof MusicUpNextInput.Type;
+
+export const MusicUpNext = Schema.Struct({
+  playlistName: MusicText,
+  /** Songs after the current one, in play order; empty after the last song. */
+  tracks: Schema.Array(MusicPlaylistTrack),
+});
+export type MusicUpNext = typeof MusicUpNext.Type;
 
 export const MusicControlInput = Schema.Union([
   Schema.TaggedStruct("play-pause", {}),
@@ -233,6 +283,8 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
     "play-playlist",
     "list-tracks",
     "play-track",
+    "search-library",
+    "up-next",
     "control",
     "artwork",
     "stats",

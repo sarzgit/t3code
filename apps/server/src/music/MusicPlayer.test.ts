@@ -113,6 +113,75 @@ const subscribe = Effect.fn("subscribe")(function* (player: MusicPlayer.MusicPla
   return { received, fiber };
 });
 
+const LIBRARY_ID = "0000000000000005";
+const PLAYLIST_ID = "5CA38D01224697B3";
+const SONG_A = "3BA40D4A07B97011";
+const SONG_B = "DD038AB38CFE38BB";
+const SONG_C = "1111222233334444";
+const VIDEO = "9999999999999999";
+
+interface FakeSong {
+  readonly id: string;
+  readonly kind?: string;
+}
+
+/** A Music app for scripts run in a VM. Like the real library, `tracks[i]` is not bulk entry i. */
+function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
+  const played: Array<string> = [];
+  const player = { position: 10 };
+  const playlist = (id: string, songs: ReadonlyArray<FakeSong>) => {
+    const column = (pick: (song: FakeSong) => unknown) => () => songs.map(pick);
+    const shifted = (i: number) => songs[(i + 1) % songs.length]!;
+    const tracks = Object.assign(
+      songs.map((_, i) => ({ play: () => played.push(shifted(i).id) })),
+      {
+        persistentID: column((song) => song.id),
+        mediaKind: column((song) => song.kind ?? "song"),
+        name: column((song) => `name ${song.id}`),
+        artist: column(() => "Artist"),
+        duration: column(() => 200),
+        whose: (query: { readonly persistentID: string }) => () =>
+          songs
+            .filter((song) => song.id === query.persistentID)
+            .map((song) => ({ play: () => played.push(song.id) })),
+      },
+    );
+    return {
+      persistentID: () => id,
+      name: () => (id === LIBRARY_ID ? "Library" : "Mix"),
+      tracks,
+      play: () => played.push(`playlist ${id}`),
+    };
+  };
+  const all = new Map(Object.entries(lists).map(([id, songs]) => [id, playlist(id, songs)]));
+  const music = {
+    running: () => true,
+    playerState: () => "playing",
+    playerPosition: () => player.position,
+    shuffleEnabled: () => false,
+    songRepeat: () => "off",
+    libraryPlaylists: [all.get(LIBRARY_ID) ?? playlist(LIBRARY_ID, [])],
+    playlists: {
+      whose: (query: { readonly persistentID: string }) => () => {
+        const found = all.get(query.persistentID);
+        return found === undefined ? [] : [found];
+      },
+    },
+  };
+  return { music, played, player };
+}
+
+/** Runs the script osascript was given against a fake Music app. */
+const runFakeScript = (args: ReadonlyArray<string>, music: unknown) =>
+  Effect.sync(() => {
+    const script = args[4]!;
+    const result: unknown = NodeVM.runInNewContext(
+      `${script.slice(MusicPlayer.JXA_NO_DOCK_ICON.length)}; run(argv)`,
+      { Application: () => music, argv: args.slice(5) },
+    );
+    return output({ stdout: String(result) });
+  });
+
 describe("decodeWatchLine", () => {
   it("maps watcher samples to player states", () => {
     assert.deepStrictEqual(MusicPlayer.decodeWatchLine('{"running":false}'), {
@@ -232,6 +301,13 @@ describe("musicStateChanged", () => {
       true,
     ],
     [
+      "T3 moved to another position in the playlist",
+      { state: ready({ playingFrom: { playlistId: "5CA38D01224697B3", index: 2 } }), atMs: 0 },
+      ready({ playingFrom: { playlistId: "5CA38D01224697B3", index: 4 } }),
+      0,
+      true,
+    ],
+    [
       "favorited",
       { state: ready(), atMs: 0 },
       ready({
@@ -286,6 +362,13 @@ describe("followPickedSong", () => {
     ["Music stopped mid-song", seen, stopped, 0, "follow"],
     ["someone played another song", seen, sample({ track: other }), 0, "drop"],
     [
+      "Music played the same song from another playlist",
+      { ...seen, musicPlaylistId: "5CA38D01224697B3" },
+      sample({ playlistId: "AAAAAAAAAAAAAAAA" }),
+      0,
+      "drop",
+    ],
+    [
       "repeat all looped the lone song",
       nearEnd,
       sample({ positionSec: 1, repeat: "all" }),
@@ -325,7 +408,11 @@ describe("MusicPlayer", () => {
         yield* player.playTrack({ playlistId, trackId: first, index: 2 });
 
         session.emit(sampleLine({ state: "playing", position: 197 }));
-        assert.strictEqual(yield* Queue.take(received).pipe(Effect.map((s) => s._tag)), "ready");
+        const playing = yield* Queue.take(received);
+        assert.deepStrictEqual(playing._tag === "ready" && playing.playingFrom, {
+          playlistId,
+          index: 2,
+        });
         session.emit(sampleLine({ state: "stopped", track: null, position: 0 }));
         const transition = yield* Queue.take(steps).pipe(
           Effect.map((args) => ({ _tag: "step" as const, args })),
@@ -341,6 +428,7 @@ describe("MusicPlayer", () => {
         session.emit(sampleLine({ state: "playing", track: { id: second, name: "Next" } }));
         const next = yield* Queue.take(received);
         assert.strictEqual(next._tag === "ready" && next.track?.id, second);
+        assert.deepStrictEqual(next._tag === "ready" && next.playingFrom, { playlistId, index: 3 });
 
         yield* player.control({ _tag: "next" });
         assert.deepStrictEqual(yield* Queue.take(steps), [playlistId, second, "3", "next"]);
@@ -664,6 +752,134 @@ describe("MusicPlayer", () => {
         assert.deepStrictEqual((yield* Ref.get(calls))[0]!.slice(5), ["AAAAAAAAAAAAAAAA", "5000"]);
         const missing = yield* Effect.flip(player.listTracks({ playlistId: "CCCCCCCCCCCCCCCC" }));
         assert.deepStrictEqual([missing.operation, missing.reason], ["list-tracks", "not-found"]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("plays and steps library songs by id, skipping other media", () =>
+    Effect.gen(function* () {
+      const fake = fakeMusic({
+        [LIBRARY_ID]: [
+          { id: SONG_A },
+          { id: VIDEO, kind: "music video" },
+          { id: SONG_B },
+          { id: SONG_C },
+        ],
+      });
+      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        yield* player.playTrack({ playlistId: LIBRARY_ID, trackId: SONG_B, index: 1 });
+        yield* player.control({ _tag: "next" });
+        fake.player.position = 1;
+        yield* player.control({ _tag: "previous" });
+        assert.deepStrictEqual(fake.played, [SONG_B, SONG_C, SONG_B]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("lists what plays next by position, wrapping only for repeat all", () =>
+    Effect.gen(function* () {
+      const many = Array.from({ length: 40 }, (_, i) => ({
+        id: `AAAAAAAAAAAA${String(i).padStart(4, "0")}`,
+      }));
+      const fake = fakeMusic({
+        [PLAYLIST_ID]: [{ id: SONG_A }, { id: SONG_B }, { id: SONG_A }, { id: SONG_C }],
+        [LIBRARY_ID]: [{ id: SONG_A }, { id: VIDEO, kind: "music video" }, { id: SONG_B }],
+        AAAAAAAAAAAAAAAA: many,
+      });
+      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const ids = (input: Parameters<typeof player.upNext>[0]) =>
+          player.upNext(input).pipe(Effect.map((up) => up.tracks.map((t) => `${t.index}:${t.id}`)));
+        // The second copy of a repeated song continues from its own position.
+        assert.deepStrictEqual(
+          yield* ids({ playlistId: PLAYLIST_ID, trackId: SONG_A, index: 2, wrap: false }),
+          [`3:${SONG_C}`],
+        );
+        assert.deepStrictEqual(
+          yield* ids({ playlistId: PLAYLIST_ID, trackId: SONG_A, index: 2, wrap: true }),
+          [`3:${SONG_C}`, `0:${SONG_A}`, `1:${SONG_B}`],
+        );
+        assert.deepStrictEqual(
+          yield* ids({ playlistId: PLAYLIST_ID, trackId: SONG_C, index: 3, wrap: false }),
+          [],
+        );
+        assert.deepStrictEqual(
+          yield* ids({ playlistId: LIBRARY_ID, trackId: SONG_A, index: 0, wrap: false }),
+          [`1:${SONG_B}`],
+        );
+        const capped = yield* ids({
+          playlistId: "AAAAAAAAAAAAAAAA",
+          trackId: many[0]!.id,
+          index: 0,
+          wrap: true,
+        });
+        assert.deepStrictEqual(
+          [capped.length, capped[0], capped.at(-1)],
+          [25, `1:${many[1]!.id}`, `25:${many[25]!.id}`],
+        );
+        const gone = yield* Effect.flip(
+          player.upNext({ playlistId: PLAYLIST_ID, trackId: VIDEO, index: 0, wrap: false }),
+        );
+        assert.deepStrictEqual([gone.operation, gone.reason], ["up-next", "not-found"]);
+        assert.strictEqual(
+          (yield* player.upNext({ playlistId: LIBRARY_ID, trackId: SONG_A, index: 0, wrap: false }))
+            .playlistName,
+          "Library",
+        );
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("searches one cached library read without passing the query to Music", () =>
+    Effect.gen(function* () {
+      const songs = [
+        ["Halo", "Beyoncé", "I Am... Sasha Fierce"],
+        ["Crazy in Love", "Beyonce", "Dangerously in Love"],
+        ["Bad", null, "Halo Remixes"],
+        ["Shallow Halo", "Someone", "Album"],
+      ] as const;
+      const filler = Array.from({ length: 60 }, (_, i) => `Filler ${i}`);
+      const reply = JSON.stringify({
+        playlistId: LIBRARY_ID,
+        ids: [
+          "nope",
+          ...songs.map((_, i) => `BBBBBBBBBBBB000${i}`),
+          ...filler.map((_, i) => `CCCCCCCCCCCC${String(i).padStart(4, "0")}`),
+        ],
+        names: [null, ...songs.map((song) => song[0]), ...filler],
+        artists: [null, ...songs.map((song) => song[1]), ...filler.map(() => "Band")],
+        albums: [null, ...songs.map((song) => song[2]), ...filler.map(() => "Album")],
+        durations: [null, ...songs.map(() => 200), ...filler.map(() => null)],
+      });
+      const { calls, runner } = yield* makeHarness({
+        respond: () => Effect.succeed(output({ stdout: reply })),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const names = (query: string) =>
+          player
+            .searchLibrary({ query })
+            .pipe(Effect.map((found) => found.songs.map((s) => `${s.index}:${s.name}`)));
+        // Accents and case fold; a name match ranks above an album match.
+        assert.deepStrictEqual(yield* names("HALO"), ["1:Halo", "4:Shallow Halo", "3:Bad"]);
+        assert.deepStrictEqual(yield* names("beyonce  love"), ["2:Crazy in Love"]);
+        assert.deepStrictEqual(yield* names("   "), []);
+        const capped = yield* player.searchLibrary({ query: "filler" });
+        assert.deepStrictEqual(
+          [capped.playlistId, capped.songs.length, capped.total],
+          [LIBRARY_ID, 50, 60],
+        );
+        assert.deepStrictEqual(
+          (yield* Ref.get(calls)).map((args) => args.slice(5)),
+          [[]],
+        );
+        // A minute later the library is read again.
+        yield* TestClock.adjust("61 seconds");
+        yield* names("halo");
+        assert.strictEqual((yield* Ref.get(calls)).length, 2);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );

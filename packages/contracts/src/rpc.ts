@@ -418,14 +418,18 @@ import {
   MusicError,
   MusicImportHistoryInput,
   MusicImportHistoryResult,
+  MusicLibrarySearch,
   MusicListTracksInput,
   MusicPlayerState,
   MusicPlaylists,
   MusicPlaylistTracks,
   MusicPlayPlaylistInput,
   MusicPlayTrackInput,
+  MusicSearchLibraryInput,
   MusicStats,
   MusicStatsInput,
+  MusicUpNext,
+  MusicUpNextInput,
 } from "./music.ts";
 
 export const WS_METHODS = {
@@ -641,6 +645,8 @@ export const WS_METHODS = {
   musicPlayPlaylist: "music.playPlaylist",
   musicListTracks: "music.listTracks",
   musicPlayTrack: "music.playTrack",
+  musicSearchLibrary: "music.searchLibrary",
+  musicGetUpNext: "music.getUpNext",
   musicControl: "music.control",
   musicGetArtwork: "music.getArtwork",
   musicGetStats: "music.getStats",
@@ -1834,6 +1840,18 @@ const WsMusicPlayTrackRpc = Rpc.make(WS_METHODS.musicPlayTrack, {
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
 });
 
+const WsMusicSearchLibraryRpc = Rpc.make(WS_METHODS.musicSearchLibrary, {
+  payload: MusicSearchLibraryInput,
+  success: MusicLibrarySearch,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicGetUpNextRpc = Rpc.make(WS_METHODS.musicGetUpNext, {
+  payload: MusicUpNextInput,
+  success: MusicUpNext,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsMusicControlRpc = Rpc.make(WS_METHODS.musicControl, {
   payload: MusicControlInput,
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
@@ -2361,6 +2379,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsMusicPlayPlaylistRpc,
   WsMusicListTracksRpc,
   WsMusicPlayTrackRpc,
+  WsMusicSearchLibraryRpc,
+  WsMusicGetUpNextRpc,
   WsMusicControlRpc,
   WsMusicGetArtworkRpc,
   WsMusicGetStatsRpc,
