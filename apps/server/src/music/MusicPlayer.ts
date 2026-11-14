@@ -378,9 +378,9 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   const list = songs(Music, found[0]);
   if (list.ids.length === 0) return "empty";
   const target = playOrder(list.ids.length, Number(argv[1]), -1)[0];
-  Music.shuffleEnabled = true;
   list.play(target);
-  // Music ignores shuffle while an Autoplay song (no playlist) was current, so set it again.
+  // Music ignores a shuffle change until the song is playing.
+  for (let i = 0; i < 20 && Music.playerState() !== "playing"; i++) delay(0.1);
   Music.shuffleEnabled = true;
   return "ok:" + target + ":" + list.ids[target];
 }${SONGS_JXA}`;

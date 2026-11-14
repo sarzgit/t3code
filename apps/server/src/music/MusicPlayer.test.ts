@@ -146,7 +146,8 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     played.push(options?.once === true ? label : `${label} (carries on)`);
     player.current = songId;
     player.playlist = playlistId;
-    player.state = "playing";
+    // Like real Music, a started song reports playing only once it has begun.
+    player.state = "starting";
   };
   const playlist = (id: string, songs: ReadonlyArray<FakeSong>) => {
     const column = (pick: (song: FakeSong) => unknown) => () => songs.map(pick);
@@ -181,7 +182,10 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
   const all = new Map(Object.entries(lists).map(([id, songs]) => [id, playlist(id, songs)]));
   const music = {
     running: () => true,
-    playerState: () => player.state,
+    playerState: () => {
+      if (player.state === "starting") player.state = "playing";
+      return player.state;
+    },
     get playerPosition() {
       return () => player.position;
     },
@@ -193,8 +197,9 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     get shuffleEnabled() {
       return () => player.state !== "stopped" && player.shuffle;
     },
+    // Real Music ignores a shuffle change until a song is playing.
     set shuffleEnabled(value: unknown) {
-      player.shuffle = value === true;
+      if (player.state === "playing") player.shuffle = value === true;
     },
     songRepeat: () => player.repeat,
     currentTrack: { persistentID: () => player.current },
@@ -919,6 +924,8 @@ describe("MusicPlayer", () => {
     Effect.gen(function* () {
       const songs = Array.from({ length: 6 }, (_, i) => ({ id: `ABCDEF012345000${i}` }));
       const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      // Music was stopped, so it ignores shuffle until T3's song is playing.
+      fake.player.state = "stopped";
       const { calls, sessions, runner } = yield* makeHarness({
         respond: (args) => runFakeScript(args, fake.music),
       });
@@ -970,6 +977,7 @@ describe("MusicPlayer", () => {
         const track = { id: songs[3]!.id, duration: 200 };
         session.emit(sampleLine({ state: "playing", position: 20, track }));
         yield* Queue.take(received);
+        fake.player.state = "playing";
         yield* player.control({ _tag: "set-shuffle", enabled: true });
         assert.strictEqual(fake.player.shuffle, true);
         // Up Next hears the new order at once, not at the next sample.
