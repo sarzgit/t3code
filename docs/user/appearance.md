@@ -55,7 +55,8 @@ When your T3 Code server runs on a Mac, the bottom of the sidebar shows what the
 playing, with a seek bar, shuffle, previous, play/pause, next, repeat, and Music's volume. Click the
 song to open your library playlists; click a playlist to see its songs, search them, and start one,
 or use **Play** and **Shuffle** for the whole playlist. The search box above the playlists also finds
-songs anywhere in your library; a song started there carries on in your library's track order.
+songs anywhere in your library; a song started there carries on through your library, in track
+order or shuffled.
 **Up Next** lists what plays after a song you started from a playlist, a search, or **Shuffle**.
 With shuffle on, T3 Code shuffles the playlist itself, so the list is what will play. Music doesn't
 share its own queue, so it can't list what comes next for **Play** or Autoplay.

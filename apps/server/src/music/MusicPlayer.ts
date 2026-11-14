@@ -319,14 +319,15 @@ const UP_NEXT_SCRIPT = `function run(argv) {
 // Music plays a scripted song alone and stops, so the server moves through the playlist itself,
 // in T3's shuffled order while Music's shuffle is on. The flag is read here, not from a sample,
 // so a late sample cannot change what plays. argv: playlist, song, position, direction, seed,
-// shuffle start, Music's playlist for the song.
+// shuffle start, Music's playlist for the song, whether Music confirmed the song.
 const STEP_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   const automatic = argv[3] === "advance";
   if (automatic && !Music.running()) return "gone";
   const playback = Music.playerState();
   if (automatic && playback === "paused") return "hold";
-  if (playback !== "stopped") {
+  // Music takes a moment to switch to a picked song, so only a song it confirmed is checked.
+  if (playback !== "stopped" && (automatic || argv[7] === "seen")) {
     // Someone started other music in Music; it is not T3's to move on.
     if (Music.currentTrack.persistentID() !== argv[1]) return "changed";
     if (argv[6] !== "none") {
@@ -334,8 +335,8 @@ const STEP_SCRIPT = `function run(argv) {
       try { playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
       if (playlistId !== null && playlistId !== argv[6]) return "changed";
     }
-    if (automatic && (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4)) return "hold";
   }
+  if (automatic && playback !== "stopped" && (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4)) return "hold";
   const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
   const previous = argv[3] === "previous";
@@ -369,7 +370,7 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
   const list = songs(Music, found[0]);
-  if (list.ids.length === 0) return "not-found";
+  if (list.ids.length === 0) return "empty";
   const target = playOrder(list.ids.length, Number(argv[1]), -1)[0];
   Music.shuffleEnabled = true;
   list.play(target);
@@ -750,6 +751,21 @@ export const pickSong = (
   shuffle,
 });
 
+/** The state with where T3 plays from, once Music confirms the picked song. */
+const withPlayingFrom = (state: MusicPlayerState, picked: PickedSong | null): MusicPlayerState => {
+  if (picked === null || !picked.seen || state._tag !== "ready") return state;
+  if (state.track?.id !== picked.trackId) return state;
+  const { playlistId, index, seed, shuffle } = picked;
+  return {
+    ...state,
+    playingFrom: {
+      playlistId,
+      index,
+      ...(shuffle === null ? {} : { shuffle: { seed, first: shuffle.first } }),
+    },
+  };
+};
+
 /** STEP_SCRIPT's "none", "free" or position for a pick's shuffle. */
 const shuffleArg = (shuffle: PickedSong["shuffle"]) =>
   shuffle === null ? "none" : shuffle.first === null ? "free" : String(shuffle.first);
@@ -815,8 +831,9 @@ export function followPickedSong(
       musicPlaylistId:
         picked.musicPlaylistId ??
         (nowMs - picked.startedAtMs >= PICK_SETTLE_MS ? state.playlistId : null),
-      // Music's shuffle flag leads; turning it on shuffles on from the current song.
-      shuffle: state.shuffle ? (picked.shuffle ?? { first: picked.index }) : null,
+      // Shuffle turned on in Music shuffles on from the current song. A sample never clears an
+      // order: it may have read the flag before a change, and steps read Music's flag anyway.
+      shuffle: picked.shuffle ?? (state.shuffle ? { first: picked.index } : null),
       positionSec: state.positionSec,
       durationSec: track.durationSec,
     },
@@ -934,6 +951,7 @@ const make = Effect.gen(function* () {
       String(from.seed),
       shuffleArg(from.shuffle),
       from.musicPlaylistId ?? "none",
+      from.seen ? "seen" : "unseen",
     ]);
     const [outcome, index, trackId, shuffle] = result.split(":");
     if (outcome === "ok" || outcome === "restart" || outcome === "end") sampleVersion++;
@@ -962,18 +980,7 @@ const make = Effect.gen(function* () {
         switch (decision._tag) {
           case "follow": {
             yield* Ref.set(picked, decision.picked);
-            if (decision.hide) return null;
-            const { seen, trackId, playlistId, index, seed, shuffle } = decision.picked;
-            return seen && state._tag === "ready" && state.track?.id === trackId
-              ? {
-                  ...state,
-                  playingFrom: {
-                    playlistId,
-                    index,
-                    ...(shuffle === null ? {} : { shuffle: { seed, first: shuffle.first } }),
-                  },
-                }
-              : state;
+            return decision.hide ? null : withPlayingFrom(state, decision.picked);
           }
           case "drop":
             yield* Ref.set(picked, null);
@@ -1000,6 +1007,23 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+
+  /** Publishes the last ready state changed by a control that just went through. */
+  const republish = (
+    change: (state: Extract<MusicPlayerState, { _tag: "ready" }>) => MusicPlayerState,
+  ) =>
+    updateLock.withPermits(1)(
+      Effect.gen(function* () {
+        const sampled = yield* Ref.get(lastSample);
+        if (sampled === null || sampled.state._tag !== "ready") return;
+        const now = yield* Clock.currentTimeMillis;
+        const moved = sampled.state.playback === "playing" ? (now - sampled.atMs) / 1000 : 0;
+        const state = change({ ...sampled.state, positionSec: sampled.state.positionSec + moved });
+        yield* Ref.set(latest, Option.some(state));
+        yield* Ref.set(lastEmitted, { state, atMs: now });
+        yield* PubSub.publish(states, state);
+      }),
+    );
 
   const runWatcherOnce = Effect.fn("MusicPlayer.watch")(function* () {
     const lines = yield* Queue.unbounded<{ readonly line: string; readonly version: number }>();
@@ -1109,6 +1133,7 @@ const make = Effect.gen(function* () {
       ]);
       const [outcome, index, trackId] = result.split(":");
       const id = persistentId(trackId);
+      if (outcome === "empty") return;
       if (outcome !== "ok" || id === null) {
         return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
       }
@@ -1252,8 +1277,7 @@ const make = Effect.gen(function* () {
     }
     yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
     if (input._tag === "set-shuffle") {
-      // Up Next follows at once; the next step reads Music's flag itself either way.
-      yield* Ref.update(picked, (current) =>
+      const current = yield* Ref.updateAndGet(picked, (current) =>
         current === null
           ? null
           : {
@@ -1261,6 +1285,8 @@ const make = Effect.gen(function* () {
               shuffle: input.enabled ? (current.shuffle ?? { first: current.index }) : null,
             },
       );
+      // Up Next follows at once rather than at the next sample; the next step reads Music's flag.
+      yield* republish((state) => withPlayingFrom({ ...state, shuffle: input.enabled }, current));
     }
     if (
       input._tag === "seek" ||

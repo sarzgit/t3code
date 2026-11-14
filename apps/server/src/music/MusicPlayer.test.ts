@@ -417,7 +417,7 @@ describe("followPickedSong", () => {
     assert.strictEqual(update._tag === "follow" && update.hide ? "hidden" : update._tag, expected);
   });
 
-  it("follows Music's shuffle flag, shuffling on from the current song", () => {
+  it("starts T3's order when Music's shuffle turns on, from the current song", () => {
     const shuffleOf = (picked: MusicPlayer.PickedSong, state: MusicPlayerState) => {
       const update = MusicPlayer.followPickedSong(picked, state, 0);
       return update._tag === "follow" ? update.picked.shuffle : "no follow";
@@ -429,8 +429,9 @@ describe("followPickedSong", () => {
     // A later song in the same shuffle keeps its order's start.
     const later = { ...seen, index: 5, shuffle: { first: 2 } };
     assert.deepStrictEqual(shuffleOf(later, sample({ shuffle: true })), { first: 2 });
-    // Turned off, or a write Music ignored, follows Music.
-    assert.strictEqual(shuffleOf(later, sample({ shuffle: false })), null);
+    // A sample may have read the flag before a change, so it never clears an order.
+    assert.deepStrictEqual(shuffleOf(later, sample({ shuffle: false })), { first: 2 });
+    assert.strictEqual(shuffleOf(seen, sample({ shuffle: false })), null);
   });
 
   it("learns Music's playlist only once the pick has settled", () => {
@@ -459,7 +460,7 @@ describe("MusicPlayer", () => {
       const { calls, sessions, runner } = yield* makeHarness({
         respond: (args) => {
           const tail = args.slice(5);
-          if (tail.length !== 7) return Effect.succeed(output({ stdout: "ok:2\n" }));
+          if (tail.length !== 8) return Effect.succeed(output({ stdout: "ok:2\n" }));
           return Queue.offer(steps, tail).pipe(
             Effect.as(output({ stdout: `ok:${Number(tail[2]) + 1}:${second}\n` })),
           );
@@ -528,7 +529,7 @@ describe("MusicPlayer", () => {
                 yield* Deferred.await(finishOperation);
                 return output({ stdout: tail[0] === "seek" ? "ok" : "restart" });
               });
-            if (tail.length === 7)
+            if (tail.length === 8)
               return Queue.offer(steps, tail).pipe(Effect.as(output({ stdout: "end" })));
             return Effect.succeed(output({ stdout: "ok:2" }));
           },
@@ -615,7 +616,7 @@ describe("MusicPlayer", () => {
               playback = "paused";
               return output({ stdout: `paused ${first} 1` });
             }
-            if (tail.length === 7) {
+            if (tail.length === 8) {
               const script = args[4]!;
               const result: unknown = NodeVM.runInNewContext(
                 script.slice(script.indexOf("function run(")) + "; run(argv)",
@@ -904,15 +905,21 @@ describe("MusicPlayer", () => {
     Effect.gen(function* () {
       const songs = Array.from({ length: 6 }, (_, i) => ({ id: `ABCDEF012345000${i}` }));
       const fake = fakeMusic({ [PLAYLIST_ID]: songs });
-      const { calls, runner } = yield* makeHarness({
+      const { calls, sessions, runner } = yield* makeHarness({
         respond: (args) => runFakeScript(args, fake.music),
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
         yield* player.playPlaylist({ playlistId: PLAYLIST_ID, shuffle: true });
         assert.strictEqual(fake.player.shuffle, true);
         const seed = Number((yield* Ref.get(calls))[0]!.slice(5)[1]);
         const first = Number(fake.played[0]!.split("#")[1]);
+        // Read the flag before Shuffle set it and the song after it started.
+        const track = { id: songs[first]!.id, duration: 200 };
+        session.emit(sampleLine({ state: "playing", position: 1, track, shuffle: false }));
+        yield* Queue.take(received);
         const upNext = yield* player.upNext({
           playlistId: PLAYLIST_ID,
           trackId: songs[first]!.id,
@@ -951,6 +958,12 @@ describe("MusicPlayer", () => {
         yield* Queue.take(received);
         yield* player.control({ _tag: "set-shuffle", enabled: true });
         assert.strictEqual(fake.player.shuffle, true);
+        // Up Next hears the new order at once, not at the next sample.
+        const toggled = yield* Queue.take(received);
+        assert.deepStrictEqual(
+          toggled._tag === "ready" && [toggled.shuffle, toggled.playingFrom?.shuffle?.first],
+          [true, 3],
+        );
         // Read before the toggle, delivered after it.
         session.emit(sampleLine({ state: "playing", position: 21, track, shuffle: false }));
         // A published change marks that the stale sample before it was handled.
@@ -976,19 +989,33 @@ describe("MusicPlayer", () => {
     }),
   );
 
-  it.effect("leaves Next to Music when Music is playing something else", () =>
+  it.effect("leaves Next to Music only once Music has confirmed T3's song", () =>
     Effect.gen(function* () {
       const fake = fakeMusic({ [PLAYLIST_ID]: [{ id: SONG_A }, { id: SONG_B }, { id: SONG_C }] });
-      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
         yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: SONG_A, index: 0 });
+        // Music has not switched yet: Next is still T3's.
         fake.player.current = VIDEO;
         yield* player.control({ _tag: "next" });
-        // T3 let go: a later Next is Music's too.
-        fake.player.current = SONG_A;
+        session.emit(sampleLine({ state: "playing", position: 5, track: { id: SONG_B } }));
+        yield* Queue.take(received);
+        // Someone played other music in Music: T3 lets go, and a later Next is Music's too.
+        fake.player.current = VIDEO;
         yield* player.control({ _tag: "next" });
-        assert.deepStrictEqual(fake.played, [`${SONG_A}#0`, "music next", "music next"]);
+        fake.player.current = SONG_B;
+        yield* player.control({ _tag: "next" });
+        assert.deepStrictEqual(fake.played, [
+          `${SONG_A}#0`,
+          `${SONG_B}#1`,
+          "music next",
+          "music next",
+        ]);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
