@@ -53,11 +53,12 @@ describe("musicUpNextSource", () => {
     ],
     ["Music's queue under shuffle", ready({ playingFrom, shuffle: true }), "music-queue"],
     ["known while T3 steps", ready({ playingFrom, playback: "paused" }), "known"],
+    ["the song again under repeat one", ready({ playingFrom, repeat: "one" }), "repeating"],
   ] as const)("%s", (_name, state, expected) => {
     expect(musicUpNextSource(state)._tag).toBe(expected);
   });
 
-  it("wraps only under repeat all and flags repeat one", () => {
+  it("wraps only under repeat all", () => {
     expect(musicUpNextSource(ready({ playingFrom, repeat: "all" }))).toEqual({
       _tag: "known",
       input: {
@@ -66,10 +67,9 @@ describe("musicUpNextSource", () => {
         index: 4,
         wrap: true,
       },
-      repeatsSong: false,
     });
-    const once = musicUpNextSource(ready({ playingFrom, repeat: "one" }));
-    expect(once._tag === "known" && [once.input.wrap, once.repeatsSong]).toEqual([false, true]);
+    const once = musicUpNextSource(ready({ playingFrom, repeat: "off" }));
+    expect(once._tag === "known" && once.input.wrap).toBe(false);
   });
 });
 

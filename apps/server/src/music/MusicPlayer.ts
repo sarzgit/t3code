@@ -214,21 +214,23 @@ const LIST_TRACKS_SCRIPT = `function run(argv) {
 }`;
 
 // Appended after a script's run handler; function declarations hoist. The library also holds
-// videos and other media, so T3 moves through its songs only. Bulk-read positions do not always
-// match track specifiers (the library skips indexes), so a song is played by its id.
+// videos and other media, so T3 moves through its songs only. Its bulk-read positions do not
+// match track specifiers (it skips indexes), so a library song is played by its id.
 const SONGS_JXA = `
 function songs(Music, playlist) {
   const tracks = playlist.tracks;
   const ids = tracks.persistentID();
   if (playlist.persistentID() !== Music.libraryPlaylists[0].persistentID()) {
-    return { ids: ids, pick: (values) => values };
+    return { ids: ids, pick: (values) => values, play: (i) => tracks[i].play() };
   }
   const kinds = tracks.mediaKind();
   const keep = (_, i) => kinds[i] === "song";
-  return { ids: ids.filter(keep), pick: (values) => values.filter(keep) };
-}
-function playSong(playlist, id) {
-  playlist.tracks.whose({ persistentID: id })()[0].play();
+  const songIds = ids.filter(keep);
+  return {
+    ids: songIds,
+    pick: (values) => values.filter(keep),
+    play: (i) => tracks.whose({ persistentID: songIds[i] })()[0].play(),
+  };
 }`;
 
 // A song can appear more than once, so it is found by position, checked against its id.
@@ -236,11 +238,12 @@ const PLAY_TRACK_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
-  const ids = songs(Music, found[0]).ids;
+  const list = songs(Music, found[0]);
+  const ids = list.ids;
   const index = Number(argv[2]);
   const target = ids[index] === argv[1] ? index : ids.indexOf(argv[1]);
   if (target < 0) return "not-found";
-  playSong(found[0], argv[1]);
+  list.play(target);
   return "ok:" + target;
 }${SONGS_JXA}`;
 
@@ -271,7 +274,8 @@ const UP_NEXT_SCRIPT = `function run(argv) {
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
   const order = [];
-  for (let step = 1; step < ids.length && order.length < Number(argv[4]); step++) {
+  // Under repeat all the list ends with the current song coming round again.
+  for (let step = 1; step <= ids.length && order.length < Number(argv[4]); step++) {
     if (current + step >= ids.length && argv[3] !== "wrap") break;
     order.push((current + step) % ids.length);
   }
@@ -311,7 +315,8 @@ const STEP_SCRIPT = `function run(argv) {
     Music.shuffleEnabled = true;
     return "playlist";
   }
-  const ids = songs(Music, found[0]).ids;
+  const list = songs(Music, found[0]);
+  const ids = list.ids;
   const given = Number(argv[2]);
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
@@ -324,7 +329,7 @@ const STEP_SCRIPT = `function run(argv) {
     }
     target = (target + ids.length) % ids.length;
   }
-  playSong(found[0], ids[target]);
+  list.play(target);
   return "ok:" + target + ":" + ids[target];
 }${SONGS_JXA}`;
 
@@ -743,7 +748,10 @@ export function followPickedSong(
     picked: {
       ...picked,
       seen: true,
-      musicPlaylistId: picked.musicPlaylistId ?? state.playlistId,
+      // A sample read while Music switched can still name the old playlist.
+      musicPlaylistId:
+        picked.musicPlaylistId ??
+        (nowMs - picked.startedAtMs >= PICK_SETTLE_MS ? state.playlistId : null),
       positionSec: state.positionSec,
       durationSec: track.durationSec,
     },

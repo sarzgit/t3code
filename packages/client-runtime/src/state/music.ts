@@ -176,7 +176,9 @@ export type MusicUpNextSource =
   | { readonly _tag: "nothing-playing" }
   /** Music runs its own queue (a whole playlist, shuffle, Autoplay) and does not share it. */
   | { readonly _tag: "music-queue" }
-  | { readonly _tag: "known"; readonly input: MusicUpNextInput; readonly repeatsSong: boolean };
+  /** Repeat one: the current song plays again until someone skips. */
+  | { readonly _tag: "repeating" }
+  | { readonly _tag: "known"; readonly input: MusicUpNextInput };
 
 /** Up Next is only listed while T3 Code moves through a playlist itself and shuffle is off. */
 export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
@@ -184,6 +186,7 @@ export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
     return { _tag: "nothing-playing" };
   }
   if (state.shuffle || state.playingFrom === undefined) return { _tag: "music-queue" };
+  if (state.repeat === "one") return { _tag: "repeating" };
   return {
     _tag: "known",
     input: {
@@ -192,7 +195,6 @@ export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
       index: state.playingFrom.index,
       wrap: state.repeat === "all",
     },
-    repeatsSong: state.repeat === "one",
   };
 }
 

@@ -408,7 +408,7 @@ function QueryProblem({ error, onRetry }: { error: string | null; onRetry: () =>
   );
 }
 
-/** Library songs for a search; null while the typed query settles. */
+/** Library songs for a search; null until a typed query first settles. */
 function LibrarySongs({
   environmentId,
   query,
@@ -490,6 +490,14 @@ function UpNext({
       : null,
   );
   if (source._tag === "nothing-playing") return <p className={EMPTY_TEXT_CLASS}>Nothing playing</p>;
+  if (source._tag === "repeating") {
+    return (
+      <p className={cn(EMPTY_TEXT_CLASS, "flex items-center justify-center gap-1.5")}>
+        <Repeat1Icon className="size-3.5 shrink-0" aria-hidden />
+        This song repeats
+      </p>
+    );
+  }
   if (source._tag === "music-queue") {
     const shuffled = state._tag === "ready" && state.shuffle;
     return (
@@ -507,12 +515,6 @@ function UpNext({
   return (
     <div className="flex flex-col gap-1">
       <p className="truncate px-2 text-xs text-muted-foreground">{label}</p>
-      {source.repeatsSong ? (
-        <p className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
-          <Repeat1Icon className="size-3.5 shrink-0" aria-hidden />
-          This song repeats
-        </p>
-      ) : null}
       {tracks.length > 0 ? (
         <ScrollArea className="max-h-64" scrollFade>
           <ol className="flex flex-col" aria-label={label}>
@@ -694,7 +696,8 @@ function PlaylistList({
               {playlistRows}
               <LibrarySongs
                 environmentId={environmentId}
-                query={settledNeedle === needle ? needle : null}
+                // The last settled results stay up while typing; each query is its own request.
+                query={settledNeedle === "" ? null : settledNeedle}
                 playingTrackId={playingTrackId}
                 controllable={controllable}
                 afterPlaylists={playlistRows !== null}
