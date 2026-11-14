@@ -343,7 +343,8 @@ const STEP_SCRIPT = `function run(argv) {
   const previous = argv[3] === "previous";
   const restart = () => { Music.playerPosition = 0; return "restart"; };
   // Only T3's song restarts; Music may still be on the one before it.
-  if (previous && onPick && Music.playerPosition() > 3) return restart();
+  const ownsPosition = onPick || playback === "stopped";
+  if (previous && ownsPosition && Music.playerPosition() > 3) return restart();
   const list = songs(Music, found[0]);
   const ids = list.ids;
   const given = Number(argv[2]);
@@ -355,7 +356,8 @@ const STEP_SCRIPT = `function run(argv) {
   let step = sequence.indexOf(current) + (previous ? -1 : 1);
   if (step < 0 || step >= ids.length) {
     if (Music.songRepeat() !== "all") {
-      if (previous) return restart();
+      // T3's song is just starting while Music still reports the one before it.
+      if (previous) return ownsPosition ? restart() : "hold";
       Music.stop();
       return "end";
     }

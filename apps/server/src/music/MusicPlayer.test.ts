@@ -1033,6 +1033,17 @@ describe("MusicPlayer", () => {
         yield* player.control({ _tag: "previous" });
         assert.deepStrictEqual(fake.played, [`${SONG_C}#2`, `${SONG_B}#1`]);
         assert.strictEqual(fake.player.position, 120);
+        // At the start of the order there is nothing before it, and still nothing to restart.
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: SONG_A, index: 0 });
+        fake.player.current = VIDEO;
+        yield* player.control({ _tag: "previous" });
+        assert.deepStrictEqual(fake.played.slice(2), [`${SONG_A}#0`]);
+        assert.strictEqual(fake.player.position, 120);
+        // Stopped past three seconds, Previous restarts as it always has.
+        fake.player.state = "stopped";
+        yield* player.control({ _tag: "previous" });
+        assert.strictEqual(fake.player.position, 0);
+        assert.strictEqual(fake.played.length, 3);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
