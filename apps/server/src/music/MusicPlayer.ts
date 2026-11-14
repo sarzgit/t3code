@@ -216,13 +216,14 @@ const LIST_TRACKS_SCRIPT = `function run(argv) {
 
 // Appended after a script's run handler; function declarations hoist. The library also holds
 // videos and other media, so T3 moves through its songs only. Its bulk-read positions do not
-// match track specifiers (it skips indexes), so a library song is played by its id.
+// match track specifiers (it skips indexes), so a library song is played by its id. Songs play
+// once: otherwise Music carries on by itself (in its own shuffle) and T3 loses its order.
 const SONGS_JXA = `
 function songs(Music, playlist) {
   const tracks = playlist.tracks;
   const ids = tracks.persistentID();
   if (playlist.persistentID() !== Music.libraryPlaylists[0].persistentID()) {
-    return { ids: ids, pick: (values) => values, play: (i) => tracks[i].play() };
+    return { ids: ids, pick: (values) => values, play: (i) => tracks[i].play({ once: true }) };
   }
   const kinds = tracks.mediaKind();
   const keep = (_, i) => kinds[i] === "song";
@@ -230,7 +231,7 @@ function songs(Music, playlist) {
   return {
     ids: songIds,
     pick: (values) => values.filter(keep),
-    play: (i) => tracks.whose({ persistentID: songIds[i] })()[0].play(),
+    play: (i) => tracks.whose({ persistentID: songIds[i] })()[0].play({ once: true }),
   };
 }
 // T3's shuffle: positions in play order. The same count, seed and first always give the same
@@ -316,10 +317,10 @@ const UP_NEXT_SCRIPT = `function run(argv) {
   });
 }${SONGS_JXA}`;
 
-// Music plays a scripted song alone and stops, so the server moves through the playlist itself,
-// in T3's shuffled order while Music's shuffle is on. The flag is read here, not from a sample,
-// so a late sample cannot change what plays. argv: playlist, song, position, direction, seed,
-// shuffle start, Music's playlist for the song, whether Music confirmed the song.
+// Songs play once, so the server steps itself, in T3's order while Music's shuffle is on. The
+// flag is read here so a late sample cannot change what plays; stopped, Music reads it as off.
+// argv: playlist, song, position, direction, seed, shuffle start, Music's playlist for the
+// song, whether Music confirmed the song, and T3's shuffle mode for when Music is stopped.
 const STEP_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   const automatic = argv[3] === "advance";
@@ -350,8 +351,9 @@ const STEP_SCRIPT = `function run(argv) {
   const given = Number(argv[2]);
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
+  const shuffled = playback === "stopped" ? argv[8] === "on" : Music.shuffleEnabled();
   // With no order yet, shuffle from the current song, as turning shuffle on does.
-  const start = Music.shuffleEnabled() ? (argv[5] === "none" ? "current" : argv[5]) : "none";
+  const start = shuffled ? (argv[5] === "none" ? "current" : argv[5]) : "none";
   const sequence = shuffleOrder(ids.length, argv[4], start, current) || ids.map((_, i) => i);
   let step = sequence.indexOf(current) + (previous ? -1 : 1);
   if (step < 0 || step >= ids.length) {
@@ -727,8 +729,10 @@ export interface PickedSong {
   readonly durationSec: number;
   /** Seeds T3's shuffled order; it carries from song to song so the order holds still. */
   readonly seed: number;
-  /** Set while T3 shuffles: where the order starts, or null for a fresh whole-playlist shuffle. */
+  /** T3's shuffled order: where it starts, or null for a fresh whole-playlist shuffle. */
   readonly shuffle: { readonly first: number | null } | null;
+  /** Music's shuffle flag as last seen playing; stopped, Music reads it as off. */
+  readonly shuffled: boolean;
 }
 
 /** The watcher samples once a second, so the last playing sample can be a few seconds early. */
@@ -753,19 +757,20 @@ export const pickSong = (
   durationSec: 0,
   seed,
   shuffle,
+  shuffled: shuffle !== null,
 });
 
 /** The state with where T3 plays from, once Music confirms the picked song. */
 const withPlayingFrom = (state: MusicPlayerState, picked: PickedSong | null): MusicPlayerState => {
   if (picked === null || !picked.seen || state._tag !== "ready") return state;
   if (state.track?.id !== picked.trackId) return state;
-  const { playlistId, index, seed, shuffle } = picked;
+  const { playlistId, index, seed, shuffle, shuffled } = picked;
   return {
     ...state,
     playingFrom: {
       playlistId,
       index,
-      ...(shuffle === null ? {} : { shuffle: { seed, first: shuffle.first } }),
+      ...(shuffle === null || !shuffled ? {} : { shuffle: { seed, first: shuffle.first } }),
     },
   };
 };
@@ -835,9 +840,10 @@ export function followPickedSong(
       musicPlaylistId:
         picked.musicPlaylistId ??
         (nowMs - picked.startedAtMs >= PICK_SETTLE_MS ? state.playlistId : null),
-      // Shuffle turned on in Music shuffles on from the current song. A sample never clears an
-      // order: it may have read the flag before a change, and steps read Music's flag anyway.
+      // Shuffle turned on in Music shuffles on from the current song. A sample never clears the
+      // order, only the mode: it may have read the flag before a change.
       shuffle: picked.shuffle ?? (state.shuffle ? { first: picked.index } : null),
+      shuffled: state.shuffle,
       positionSec: state.positionSec,
       durationSec: track.durationSec,
     },
@@ -960,6 +966,7 @@ const make = Effect.gen(function* () {
       shuffleArg(from.shuffle),
       from.musicPlaylistId ?? "none",
       from.seen ? "seen" : "unseen",
+      from.shuffled ? "on" : "off",
     ]);
     const [outcome, index, trackId, shuffle] = result.split(":");
     if (outcome === "ok" || outcome === "restart" || outcome === "end") sampleVersion++;
@@ -1297,6 +1304,7 @@ const make = Effect.gen(function* () {
           : {
               ...current,
               shuffle: input.enabled ? (current.shuffle ?? { first: current.index }) : null,
+              shuffled: input.enabled,
             },
       );
       // Up Next follows at once rather than at the next sample; the next step reads Music's flag.

@@ -136,8 +136,14 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     current: "",
     playlist: null as string | null,
   };
-  const start = (playlistId: string, songId: string, label: string) => {
-    played.push(label);
+  // Without `once`, real Music carries on by itself after the song, so such a play is marked.
+  const start = (
+    playlistId: string,
+    songId: string,
+    label: string,
+    options?: { once?: boolean },
+  ) => {
+    played.push(options?.once === true ? label : `${label} (carries on)`);
     player.current = songId;
     player.playlist = playlistId;
     player.state = "playing";
@@ -147,7 +153,10 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     const shifted = (i: number) => songs[id === LIBRARY_ID ? (i + 1) % songs.length : i]!;
     const tracks = Object.assign(
       // A specifier play records its row, so a repeated song's copies stay apart.
-      songs.map((_, i) => ({ play: () => start(id, shifted(i).id, `${shifted(i).id}#${i}`) })),
+      songs.map((_, i) => ({
+        play: (options?: { once?: boolean }) =>
+          start(id, shifted(i).id, `${shifted(i).id}#${i}`, options),
+      })),
       {
         persistentID: column((song) => song.id),
         mediaKind: column((song) => song.kind ?? "song"),
@@ -157,7 +166,9 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
         whose: (query: { readonly persistentID: string }) => () =>
           songs
             .filter((song) => song.id === query.persistentID)
-            .map((song) => ({ play: () => start(id, song.id, song.id) })),
+            .map((song) => ({
+              play: (options?: { once?: boolean }) => start(id, song.id, song.id, options),
+            })),
       },
     );
     return {
@@ -178,8 +189,9 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     set playerPosition(value: unknown) {
       player.position = Number(value);
     },
+    // Stopped, real Music reads its shuffle setting as off.
     get shuffleEnabled() {
-      return () => player.shuffle;
+      return () => player.state !== "stopped" && player.shuffle;
     },
     set shuffleEnabled(value: unknown) {
       player.shuffle = value === true;
@@ -429,8 +441,10 @@ describe("followPickedSong", () => {
     // A later song in the same shuffle keeps its order's start.
     const later = { ...seen, index: 5, shuffle: { first: 2 } };
     assert.deepStrictEqual(shuffleOf(later, sample({ shuffle: true })), { first: 2 });
-    // A sample may have read the flag before a change, so it never clears an order.
+    // A sample may have read the flag before a change, so it never clears the order, only the mode.
     assert.deepStrictEqual(shuffleOf(later, sample({ shuffle: false })), { first: 2 });
+    const off = MusicPlayer.followPickedSong(later, sample({ shuffle: false }), 0);
+    assert.strictEqual(off._tag === "follow" && off.picked.shuffled, false);
     assert.strictEqual(shuffleOf(seen, sample({ shuffle: false })), null);
   });
 
@@ -460,7 +474,7 @@ describe("MusicPlayer", () => {
       const { calls, sessions, runner } = yield* makeHarness({
         respond: (args) => {
           const tail = args.slice(5);
-          if (tail.length !== 8) return Effect.succeed(output({ stdout: "ok:2\n" }));
+          if (tail.length !== 9) return Effect.succeed(output({ stdout: "ok:2\n" }));
           return Queue.offer(steps, tail).pipe(
             Effect.as(output({ stdout: `ok:${Number(tail[2]) + 1}:${second}\n` })),
           );
@@ -529,7 +543,7 @@ describe("MusicPlayer", () => {
                 yield* Deferred.await(finishOperation);
                 return output({ stdout: tail[0] === "seek" ? "ok" : "restart" });
               });
-            if (tail.length === 8)
+            if (tail.length === 9)
               return Queue.offer(steps, tail).pipe(Effect.as(output({ stdout: "end" })));
             return Effect.succeed(output({ stdout: "ok:2" }));
           },
@@ -616,7 +630,7 @@ describe("MusicPlayer", () => {
               playback = "paused";
               return output({ stdout: `paused ${first} 1` });
             }
-            if (tail.length === 8) {
+            if (tail.length === 9) {
               const script = args[4]!;
               const result: unknown = NodeVM.runInNewContext(
                 script.slice(script.indexOf("function run(")) + "; run(argv)",
