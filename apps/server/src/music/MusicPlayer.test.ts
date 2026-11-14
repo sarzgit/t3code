@@ -1020,6 +1020,44 @@ describe("MusicPlayer", () => {
     }),
   );
 
+  it.effect("steps back through T3's order before Music has switched to the pick", () =>
+    Effect.gen(function* () {
+      const fake = fakeMusic({ [PLAYLIST_ID]: [{ id: SONG_A }, { id: SONG_B }, { id: SONG_C }] });
+      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: SONG_C, index: 2 });
+        // Music still reports the song before, two minutes in; that is not T3's to restart.
+        fake.player.current = VIDEO;
+        fake.player.position = 120;
+        yield* player.control({ _tag: "previous" });
+        assert.deepStrictEqual(fake.played, [`${SONG_C}#2`, `${SONG_B}#1`]);
+        assert.strictEqual(fake.player.position, 120);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("keeps a seek when a shuffle toggle republishes the state", () =>
+    Effect.gen(function* () {
+      const fake = fakeMusic({ [PLAYLIST_ID]: [{ id: SONG_A }, { id: SONG_B }, { id: SONG_C }] });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: SONG_A, index: 0 });
+        session.emit(sampleLine({ state: "playing", position: 20, track: { id: SONG_A } }));
+        yield* Queue.take(received);
+        yield* player.control({ _tag: "seek", positionSec: 21 });
+        yield* player.control({ _tag: "set-shuffle", enabled: true });
+        const toggled = yield* Queue.take(received);
+        assert.strictEqual(toggled._tag === "ready" && toggled.positionSec, 21);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect("lists what plays next by position, wrapping only for repeat all", () =>
     Effect.gen(function* () {
       const many = Array.from({ length: 40 }, (_, i) => ({

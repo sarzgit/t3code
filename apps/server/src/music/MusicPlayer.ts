@@ -326,10 +326,11 @@ const STEP_SCRIPT = `function run(argv) {
   if (automatic && !Music.running()) return "gone";
   const playback = Music.playerState();
   if (automatic && playback === "paused") return "hold";
+  const onPick = playback !== "stopped" && Music.currentTrack.persistentID() === argv[1];
   // Music takes a moment to switch to a picked song, so only a song it confirmed is checked.
   if (playback !== "stopped" && (automatic || argv[7] === "seen")) {
     // Someone started other music in Music; it is not T3's to move on.
-    if (Music.currentTrack.persistentID() !== argv[1]) return "changed";
+    if (!onPick) return "changed";
     if (argv[6] !== "none") {
       let playlistId = null;
       try { playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
@@ -341,7 +342,8 @@ const STEP_SCRIPT = `function run(argv) {
   if (found.length === 0) return "not-found";
   const previous = argv[3] === "previous";
   const restart = () => { Music.playerPosition = 0; return "restart"; };
-  if (previous && Music.playerPosition() > 3) return restart();
+  // Only T3's song restarts; Music may still be on the one before it.
+  if (previous && onPick && Music.playerPosition() > 3) return restart();
   const list = songs(Music, found[0]);
   const ids = list.ids;
   const given = Number(argv[2]);
@@ -876,6 +878,10 @@ const make = Effect.gen(function* () {
   const subscriberCount = yield* Ref.make(0);
   const watcher = yield* FiberHandle.make<void, never>();
   const lastSample = yield* Ref.make<EmittedMusicState | null>(null);
+  const seekSinceSample = yield* Ref.make<{
+    readonly positionSec: number;
+    readonly atMs: number;
+  } | null>(null);
   const workingProjectIds = yield* Ref.make<ReadonlySet<string>>(new Set());
   const cueState = yield* Ref.make<CueState>(INITIAL_CUE_STATE);
   const cueLock = yield* Semaphore.make(1);
@@ -999,6 +1005,7 @@ const make = Effect.gen(function* () {
     yield* updateLock.withPermits(1)(
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
+        yield* Ref.set(seekSinceSample, null);
         yield* creditSample(state, now);
         yield* Ref.set(latest, Option.some(state));
         if (!musicStateChanged(yield* Ref.get(lastEmitted), state, now)) return;
@@ -1017,8 +1024,13 @@ const make = Effect.gen(function* () {
         const sampled = yield* Ref.get(lastSample);
         if (sampled === null || sampled.state._tag !== "ready") return;
         const now = yield* Clock.currentTimeMillis;
-        const moved = sampled.state.playback === "playing" ? (now - sampled.atMs) / 1000 : 0;
-        const state = change({ ...sampled.state, positionSec: sampled.state.positionSec + moved });
+        // A seek since that sample is where Music is now; republishing the sample would undo it.
+        const from = (yield* Ref.get(seekSinceSample)) ?? {
+          positionSec: sampled.state.positionSec,
+          atMs: sampled.atMs,
+        };
+        const moved = sampled.state.playback === "playing" ? (now - from.atMs) / 1000 : 0;
+        const state = change({ ...sampled.state, positionSec: from.positionSec + moved });
         yield* Ref.set(latest, Option.some(state));
         yield* Ref.set(lastEmitted, { state, atMs: now });
         yield* PubSub.publish(states, state);
@@ -1301,6 +1313,8 @@ const make = Effect.gen(function* () {
       yield* Ref.update(picked, (current) =>
         current === null ? null : { ...current, positionSec: input.positionSec },
       );
+      const atMs = yield* Clock.currentTimeMillis;
+      yield* Ref.set(seekSinceSample, { positionSec: input.positionSec, atMs });
     }
   }, pickLock.withPermits(1));
 
