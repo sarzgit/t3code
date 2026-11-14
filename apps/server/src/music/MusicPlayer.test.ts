@@ -1039,11 +1039,12 @@ describe("MusicPlayer", () => {
         yield* player.control({ _tag: "previous" });
         assert.deepStrictEqual(fake.played.slice(2), [`${SONG_A}#0`]);
         assert.strictEqual(fake.player.position, 120);
-        // Stopped past three seconds, Previous restarts as it always has.
+        // Stopped past three seconds mid-order, Previous restarts as it always has.
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: SONG_C, index: 2 });
         fake.player.state = "stopped";
         yield* player.control({ _tag: "previous" });
         assert.strictEqual(fake.player.position, 0);
-        assert.strictEqual(fake.played.length, 3);
+        assert.deepStrictEqual(fake.played.slice(3), [`${SONG_C}#2`]);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
