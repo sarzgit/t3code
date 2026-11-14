@@ -85,6 +85,14 @@ export type MusicRepeatMode = typeof MusicRepeatMode.Type;
 
 export const MusicVolume = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
 
+/** T3 Code's own shuffle of a playlist: the same seed and start always give the same order. */
+export const MusicShuffleOrder = Schema.Struct({
+  seed: Schema.Int,
+  /** The position the order starts from; null for a fresh shuffle of the whole playlist. */
+  first: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type MusicShuffleOrder = typeof MusicShuffleOrder.Type;
+
 export const MusicPlayerState = Schema.Union([
   /** The server's host is not macOS. */
   Schema.TaggedStruct("unsupported", {}),
@@ -106,6 +114,8 @@ export const MusicPlayerState = Schema.Union([
       Schema.Struct({
         playlistId: MusicPersistentId,
         index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+        /** Set while T3 Code shuffles the playlist itself. */
+        shuffle: Schema.optionalKey(MusicShuffleOrder),
       }),
     ),
   }),
@@ -189,6 +199,7 @@ export const MusicUpNextInput = Schema.Struct({
   index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   /** Repeat all: continue from the top after the last song. */
   wrap: Schema.Boolean,
+  shuffle: Schema.optionalKey(MusicShuffleOrder),
 });
 export type MusicUpNextInput = typeof MusicUpNextInput.Type;
 

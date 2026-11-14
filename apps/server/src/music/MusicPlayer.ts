@@ -36,6 +36,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -231,6 +232,29 @@ function songs(Music, playlist) {
     pick: (values) => values.filter(keep),
     play: (i) => tracks.whose({ persistentID: songIds[i] })()[0].play(),
   };
+}
+// T3's shuffle: positions in play order. The same count, seed and first always give the same
+// order, so the step and Up Next scripts agree. first < 0 shuffles every position.
+function playOrder(count, seed, first) {
+  const rest = [];
+  for (let i = 0; i < count; i++) if (i !== first) rest.push(i);
+  let state = seed >>> 0 || 1;
+  const random = () => {
+    state ^= state << 13; state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5; state >>>= 0;
+    return state / 4294967296;
+  };
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    const swap = rest[i]; rest[i] = rest[j]; rest[j] = swap;
+  }
+  return first >= 0 && first < count ? [first].concat(rest) : rest;
+}
+// argv seed and first ("free", "none" or a position) as an order, or null when not shuffling.
+function shuffleOrder(count, seed, first, current) {
+  if (first === "none") return null;
+  return playOrder(count, Number(seed), first === "free" ? -1 : first === "current" ? current : Number(first));
 }`;
 
 // A song can appear more than once, so it is found by position, checked against its id.
@@ -273,11 +297,13 @@ const UP_NEXT_SCRIPT = `function run(argv) {
   const given = Number(argv[2]);
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
+  const sequence = shuffleOrder(ids.length, argv[5], argv[6], current) || ids.map((_, i) => i);
+  const at = sequence.indexOf(current);
   const order = [];
   // Under repeat all the list ends with the current song coming round again.
   for (let step = 1; step <= ids.length && order.length < Number(argv[4]); step++) {
-    if (current + step >= ids.length && argv[3] !== "wrap") break;
-    order.push((current + step) % ids.length);
+    if (at + step >= ids.length && argv[3] !== "wrap") break;
+    order.push(sequence[(at + step) % ids.length]);
   }
   const tracks = found[0].tracks;
   const names = order.length > 0 ? list.pick(tracks.name()) : [];
@@ -290,47 +316,66 @@ const UP_NEXT_SCRIPT = `function run(argv) {
   });
 }${SONGS_JXA}`;
 
-// Music plays a scripted song alone: at its end playback stops, and next or previous only
-// restart it. So the server moves through the playlist itself, one song at a time.
+// Music plays a scripted song alone and stops, so the server moves through the playlist itself,
+// in T3's shuffled order while Music's shuffle is on. The flag is read here, not from a sample,
+// so a late sample cannot change what plays. argv: playlist, song, position, direction, seed,
+// shuffle start, Music's playlist for the song.
 const STEP_SCRIPT = `function run(argv) {
   const Music = Application("Music");
-  if (argv[3] === "advance") {
-    if (!Music.running()) return "gone";
-    const playback = Music.playerState();
-    if (playback === "paused") return "hold";
-    if (playback !== "stopped") {
-      if (Music.currentTrack.persistentID() !== argv[1]) return "changed";
-      if (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4) return "hold";
+  const automatic = argv[3] === "advance";
+  if (automatic && !Music.running()) return "gone";
+  const playback = Music.playerState();
+  if (automatic && playback === "paused") return "hold";
+  if (playback !== "stopped") {
+    // Someone started other music in Music; it is not T3's to move on.
+    if (Music.currentTrack.persistentID() !== argv[1]) return "changed";
+    if (argv[6] !== "none") {
+      let playlistId = null;
+      try { playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
+      if (playlistId !== null && playlistId !== argv[6]) return "changed";
     }
+    if (automatic && (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4)) return "hold";
   }
   const found = Music.playlists.whose({ persistentID: argv[0] })();
   if (found.length === 0) return "not-found";
   const previous = argv[3] === "previous";
   const restart = () => { Music.playerPosition = 0; return "restart"; };
   if (previous && Music.playerPosition() > 3) return restart();
-  if (Music.shuffleEnabled()) {
-    if (previous) return restart();
-    // Music shuffles a whole playlist itself, so it can take over from here.
-    found[0].play();
-    Music.shuffleEnabled = true;
-    return "playlist";
-  }
   const list = songs(Music, found[0]);
   const ids = list.ids;
   const given = Number(argv[2]);
   const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
   if (current < 0) return "not-found";
-  let target = current + (previous ? -1 : 1);
-  if (target < 0 || target >= ids.length) {
+  // With no order yet, shuffle from the current song, as turning shuffle on does.
+  const start = Music.shuffleEnabled() ? (argv[5] === "none" ? "current" : argv[5]) : "none";
+  const sequence = shuffleOrder(ids.length, argv[4], start, current) || ids.map((_, i) => i);
+  let step = sequence.indexOf(current) + (previous ? -1 : 1);
+  if (step < 0 || step >= ids.length) {
     if (Music.songRepeat() !== "all") {
       if (previous) return restart();
       Music.stop();
       return "end";
     }
-    target = (target + ids.length) % ids.length;
+    step = (step + ids.length) % ids.length;
   }
+  const target = sequence[step];
   list.play(target);
-  return "ok:" + target + ":" + ids[target];
+  return "ok:" + target + ":" + ids[target] + ":" + (start === "current" ? current : start);
+}${SONGS_JXA}`;
+
+// Playlist Shuffle: T3 shuffles the playlist itself and starts at the top of its order.
+const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const list = songs(Music, found[0]);
+  if (list.ids.length === 0) return "not-found";
+  const target = playOrder(list.ids.length, Number(argv[1]), -1)[0];
+  Music.shuffleEnabled = true;
+  list.play(target);
+  // Music ignores shuffle while an Autoplay song (no playlist) was current, so set it again.
+  Music.shuffleEnabled = true;
+  return "ok:" + target + ":" + list.ids[target];
 }${SONGS_JXA}`;
 
 const CONTROL_SCRIPT = `function run(argv) {
@@ -675,6 +720,10 @@ export interface PickedSong {
   readonly musicPlaylistId: string | null;
   readonly positionSec: number;
   readonly durationSec: number;
+  /** Seeds T3's shuffled order; it carries from song to song so the order holds still. */
+  readonly seed: number;
+  /** Set while T3 shuffles: where the order starts, or null for a fresh whole-playlist shuffle. */
+  readonly shuffle: { readonly first: number | null } | null;
 }
 
 /** The watcher samples once a second, so the last playing sample can be a few seconds early. */
@@ -686,6 +735,8 @@ export const pickSong = (
   trackId: string,
   index: number,
   startedAtMs: number,
+  seed: number,
+  shuffle: PickedSong["shuffle"] = null,
 ): PickedSong => ({
   playlistId,
   trackId,
@@ -695,7 +746,19 @@ export const pickSong = (
   musicPlaylistId: null,
   positionSec: 0,
   durationSec: 0,
+  seed,
+  shuffle,
 });
+
+/** STEP_SCRIPT's "none", "free" or position for a pick's shuffle. */
+const shuffleArg = (shuffle: PickedSong["shuffle"]) =>
+  shuffle === null ? "none" : shuffle.first === null ? "free" : String(shuffle.first);
+
+const parseShuffleArg = (value: string | undefined): PickedSong["shuffle"] => {
+  if (value === "free") return { first: null };
+  const first = Number(value);
+  return value !== undefined && Number.isInteger(first) && first >= 0 ? { first } : null;
+};
 
 export type PickedSongUpdate =
   | { readonly _tag: "follow"; readonly picked: PickedSong; readonly hide: boolean }
@@ -752,6 +815,8 @@ export function followPickedSong(
       musicPlaylistId:
         picked.musicPlaylistId ??
         (nowMs - picked.startedAtMs >= PICK_SETTLE_MS ? state.playlistId : null),
+      // Music's shuffle flag leads; turning it on shuffles on from the current song.
+      shuffle: state.shuffle ? (picked.shuffle ?? { first: picked.index }) : null,
       positionSec: state.positionSec,
       durationSec: track.durationSec,
     },
@@ -853,6 +918,7 @@ const make = Effect.gen(function* () {
   // Held while a song is picked or stepped, so the watcher judges samples against the song
   // Music was last told to play. Songs only advance on their own while someone watches.
   const pickLock = yield* Semaphore.make(1);
+  const newSeed = Random.nextIntBetween(1, 2_147_483_647);
   const picked = yield* Ref.make<PickedSong | null>(null);
   let sampleVersion = 0;
 
@@ -865,16 +931,17 @@ const make = Effect.gen(function* () {
       from.trackId,
       String(from.index),
       direction,
+      String(from.seed),
+      shuffleArg(from.shuffle),
+      from.musicPlaylistId ?? "none",
     ]);
-    const [outcome, index, trackId] = result.split(":");
-    if (outcome === "ok" || outcome === "restart" || outcome === "playlist" || outcome === "end") {
-      sampleVersion++;
-    }
+    const [outcome, index, trackId, shuffle] = result.split(":");
+    if (outcome === "ok" || outcome === "restart" || outcome === "end") sampleVersion++;
     const nextId = persistentId(trackId);
     const now = yield* Clock.currentTimeMillis;
     const next =
       outcome === "ok" && nextId !== null
-        ? pickSong(from.playlistId, nextId, Number(index), now)
+        ? pickSong(from.playlistId, nextId, Number(index), now, from.seed, parseShuffleArg(shuffle))
         : outcome === "restart"
           ? { ...from, positionSec: 0 }
           : outcome === "hold"
@@ -896,9 +963,16 @@ const make = Effect.gen(function* () {
           case "follow": {
             yield* Ref.set(picked, decision.picked);
             if (decision.hide) return null;
-            const { seen, trackId, playlistId, index } = decision.picked;
+            const { seen, trackId, playlistId, index, seed, shuffle } = decision.picked;
             return seen && state._tag === "ready" && state.track?.id === trackId
-              ? { ...state, playingFrom: { playlistId, index } }
+              ? {
+                  ...state,
+                  playingFrom: {
+                    playlistId,
+                    index,
+                    ...(shuffle === null ? {} : { shuffle: { seed, first: shuffle.first } }),
+                  },
+                }
               : state;
           }
           case "drop":
@@ -1027,6 +1101,26 @@ const make = Effect.gen(function* () {
   const playPlaylist = Effect.fn("MusicPlayer.playPlaylist")(function* (
     input: MusicPlayPlaylistInput,
   ) {
+    if (input.shuffle === true) {
+      const seed = yield* newSeed;
+      const result = yield* runScript("play-playlist", "JavaScript", PLAY_SHUFFLED_SCRIPT, [
+        input.playlistId,
+        String(seed),
+      ]);
+      const [outcome, index, trackId] = result.split(":");
+      const id = persistentId(trackId);
+      if (outcome !== "ok" || id === null) {
+        return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
+      }
+      sampleVersion++;
+      yield* Ref.set(
+        picked,
+        pickSong(input.playlistId, id, Number(index), yield* Clock.currentTimeMillis, seed, {
+          first: null,
+        }),
+      );
+      return;
+    }
     const shuffle =
       input.shuffle === undefined ? "keep" : input.shuffle ? "shuffle-on" : "shuffle-off";
     const result = yield* runScript("play-playlist", "JavaScript", PLAY_SCRIPT, [
@@ -1079,6 +1173,7 @@ const make = Effect.gen(function* () {
         input.trackId,
         Number.isInteger(index) ? index : input.index,
         yield* Clock.currentTimeMillis,
+        yield* newSeed,
       ),
     );
   }, pickLock.withPermits(1));
@@ -1117,6 +1212,8 @@ const make = Effect.gen(function* () {
       String(input.index),
       input.wrap ? "wrap" : "stop",
       String(UP_NEXT_LIMIT),
+      String(input.shuffle?.seed ?? 0),
+      shuffleArg(input.shuffle ?? null),
     ]);
     if (result === "not-found") {
       return yield* new MusicError({ operation: "up-next", reason: "not-found" });
@@ -1149,12 +1246,25 @@ const make = Effect.gen(function* () {
   const control = Effect.fn("MusicPlayer.control")(function* (input: MusicControlInput) {
     if (input._tag === "next" || input._tag === "previous") {
       const current = yield* Ref.get(picked);
-      // A playlist that is gone leaves Music's own next and previous to act.
-      if (current !== null && (yield* stepPicked(current, input._tag)) !== "not-found") return;
+      // A playlist that is gone, or music someone else started, leaves Music's own controls.
+      const outcome = current === null ? null : yield* stepPicked(current, input._tag);
+      if (outcome !== null && outcome !== "not-found" && outcome !== "changed") return;
     }
     yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
+    if (input._tag === "set-shuffle") {
+      // Up Next follows at once; the next step reads Music's flag itself either way.
+      yield* Ref.update(picked, (current) =>
+        current === null
+          ? null
+          : {
+              ...current,
+              shuffle: input.enabled ? (current.shuffle ?? { first: current.index }) : null,
+            },
+      );
+    }
     if (
       input._tag === "seek" ||
+      input._tag === "set-shuffle" ||
       input._tag === "play-pause" ||
       input._tag === "next" ||
       input._tag === "previous"

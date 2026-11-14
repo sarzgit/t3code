@@ -499,19 +499,22 @@ function UpNext({
     );
   }
   if (source._tag === "music-queue") {
-    const shuffled = state._tag === "ready" && state.shuffle;
     return (
       <div className={cn(EMPTY_TEXT_CLASS, "flex flex-col gap-0.5")}>
-        <p>
-          {shuffled ? "Music doesn't share its shuffle order." : "Music doesn't share its queue."}
-        </p>
-        {shuffled ? null : <p>Play a song from a playlist or search to see what's next.</p>}
+        <p>Music doesn't share its queue.</p>
+        <p>Play a song from a playlist or search to see what's next.</p>
       </div>
     );
   }
   if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
   const { playlistName, tracks } = query.data;
-  const label = `${tracks.length === 0 ? "Last song in" : "Next in"} ${playlistName || "playlist"}`;
+  const name = playlistName || "playlist";
+  const label =
+    tracks.length === 0
+      ? `Last song in ${name}`
+      : source.input.shuffle
+        ? `Shuffling ${name}`
+        : `Next in ${name}`;
   return (
     <div className="flex flex-col gap-1">
       <p className="truncate px-2 text-xs text-muted-foreground">{label}</p>

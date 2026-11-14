@@ -51,7 +51,16 @@ describe("musicUpNextSource", () => {
       ready({ playlistId: playingFrom.playlistId }),
       "music-queue",
     ],
-    ["Music's queue under shuffle", ready({ playingFrom, shuffle: true }), "music-queue"],
+    [
+      "Music's queue under Music's own shuffle",
+      ready({ playingFrom, shuffle: true }),
+      "music-queue",
+    ],
+    [
+      "known under T3's shuffle",
+      ready({ playingFrom: { ...playingFrom, shuffle: { seed: 9, first: 4 } }, shuffle: true }),
+      "known",
+    ],
     ["known while T3 steps", ready({ playingFrom, playback: "paused" }), "known"],
     ["the song again under repeat one", ready({ playingFrom, repeat: "one" }), "repeating"],
   ] as const)("%s", (_name, state, expected) => {
@@ -70,6 +79,17 @@ describe("musicUpNextSource", () => {
     });
     const once = musicUpNextSource(ready({ playingFrom, repeat: "off" }));
     expect(once._tag === "known" && once.input.wrap).toBe(false);
+  });
+
+  it("lists T3's shuffle only while Music's shuffle is on", () => {
+    const shuffle = { seed: 9, first: null };
+    const on = musicUpNextSource(
+      ready({ playingFrom: { ...playingFrom, shuffle }, shuffle: true }),
+    );
+    expect(on._tag === "known" && on.input.shuffle).toEqual(shuffle);
+    // Turned off in Music before T3 heard: the next step goes in playlist order.
+    const off = musicUpNextSource(ready({ playingFrom: { ...playingFrom, shuffle } }));
+    expect(off._tag === "known" && off.input.shuffle).toBe(undefined);
   });
 });
 

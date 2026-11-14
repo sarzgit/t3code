@@ -180,20 +180,27 @@ export type MusicUpNextSource =
   | { readonly _tag: "repeating" }
   | { readonly _tag: "known"; readonly input: MusicUpNextInput };
 
-/** Up Next is only listed while T3 Code moves through a playlist itself and shuffle is off. */
+/**
+ * Up Next is only listed while T3 Code moves through a playlist itself, in its own shuffled
+ * order when Music's shuffle is on. Music's flag decides each step, so it decides here too.
+ */
 export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
   if (state._tag !== "ready" || state.track === null || state.playback === "stopped") {
     return { _tag: "nothing-playing" };
   }
-  if (state.shuffle || state.playingFrom === undefined) return { _tag: "music-queue" };
+  const from = state.playingFrom;
+  if (from === undefined || (state.shuffle && from.shuffle === undefined)) {
+    return { _tag: "music-queue" };
+  }
   if (state.repeat === "one") return { _tag: "repeating" };
   return {
     _tag: "known",
     input: {
-      playlistId: state.playingFrom.playlistId,
+      playlistId: from.playlistId,
       trackId: state.track.id,
-      index: state.playingFrom.index,
+      index: from.index,
       wrap: state.repeat === "all",
+      ...(state.shuffle && from.shuffle !== undefined ? { shuffle: from.shuffle } : {}),
     },
   };
 }
