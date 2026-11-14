@@ -378,11 +378,13 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   const list = songs(Music, found[0]);
   if (list.ids.length === 0) return "empty";
   const target = playOrder(list.ids.length, Number(argv[1]), -1)[0];
-  list.play(target);
-  // Music ignores a shuffle change until the song is playing.
-  for (let i = 0; i < 20 && Music.playerState() !== "playing"; i++) delay(0.1);
+  // Music ignores a shuffle change until a song is playing, and a streamed song can take seconds
+  // to start; the write before play covers Music already playing something.
   Music.shuffleEnabled = true;
-  return "ok:" + target + ":" + list.ids[target];
+  list.play(target);
+  for (let i = 0; i < 100 && Music.playerState() !== "playing"; i++) delay(0.1);
+  Music.shuffleEnabled = true;
+  return "ok:" + target + ":" + list.ids[target] + ":" + (Music.shuffleEnabled() ? "on" : "off");
 }${SONGS_JXA}`;
 
 const CONTROL_SCRIPT = `function run(argv) {
@@ -1152,19 +1154,25 @@ const make = Effect.gen(function* () {
         input.playlistId,
         String(seed),
       ]);
-      const [outcome, index, trackId] = result.split(":");
+      const [outcome, index, trackId, shuffleFlag] = result.split(":");
       const id = persistentId(trackId);
       if (outcome === "empty") return;
       if (outcome !== "ok" || id === null) {
         return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
       }
       sampleVersion++;
-      yield* Ref.set(
-        picked,
-        pickSong(input.playlistId, id, Number(index), yield* Clock.currentTimeMillis, seed, {
+      const pick = pickSong(
+        input.playlistId,
+        id,
+        Number(index),
+        yield* Clock.currentTimeMillis,
+        seed,
+        {
           first: null,
-        }),
+        },
       );
+      // If Music never took the shuffle, say so; turning it on later keeps this order.
+      yield* Ref.set(picked, shuffleFlag === "off" ? { ...pick, shuffled: false } : pick);
       return;
     }
     const shuffle =

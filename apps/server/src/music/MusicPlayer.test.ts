@@ -135,6 +135,9 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     repeat: "off",
     current: "",
     playlist: null as string | null,
+    /** How many playerState reads a started song stays starting, like a streamed song. */
+    startDelayReads: 0,
+    startReads: 0,
   };
   // Without `once`, real Music carries on by itself after the song, so such a play is marked.
   const start = (
@@ -148,6 +151,7 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     player.playlist = playlistId;
     // Like real Music, a started song reports playing only once it has begun.
     player.state = "starting";
+    player.startReads = player.startDelayReads;
   };
   const playlist = (id: string, songs: ReadonlyArray<FakeSong>) => {
     const column = (pick: (song: FakeSong) => unknown) => () => songs.map(pick);
@@ -183,7 +187,7 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
   const music = {
     running: () => true,
     playerState: () => {
-      if (player.state === "starting") player.state = "playing";
+      if (player.state === "starting" && player.startReads-- <= 0) player.state = "playing";
       return player.state;
     },
     get playerPosition() {
@@ -227,7 +231,7 @@ const runFakeScript = (args: ReadonlyArray<string>, music: unknown) =>
     const script = args[4]!;
     const result: unknown = NodeVM.runInNewContext(
       `${script.slice(MusicPlayer.JXA_NO_DOCK_ICON.length)}; run(argv)`,
-      { Application: () => music, argv: args.slice(5) },
+      { Application: () => music, argv: args.slice(5), delay: () => {} },
     );
     return output({ stdout: String(result) });
   });
@@ -924,8 +928,9 @@ describe("MusicPlayer", () => {
     Effect.gen(function* () {
       const songs = Array.from({ length: 6 }, (_, i) => ({ id: `ABCDEF012345000${i}` }));
       const fake = fakeMusic({ [PLAYLIST_ID]: songs });
-      // Music was stopped, so it ignores shuffle until T3's song is playing.
+      // Music was stopped, so it ignores shuffle until T3's song is playing, a few seconds later.
       fake.player.state = "stopped";
+      fake.player.startDelayReads = 30;
       const { calls, sessions, runner } = yield* makeHarness({
         respond: (args) => runFakeScript(args, fake.music),
       });
