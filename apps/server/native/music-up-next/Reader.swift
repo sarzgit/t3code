@@ -8,7 +8,8 @@ protocol Node {
   var title: String? { get }
   var descriptionText: String? { get }
   var value: String? { get }
-  var children: [Self] { get }
+  /** nil when the children could not be read, as opposed to there being none. */
+  var children: [Self]? { get }
   /** AXVisibleRows of a table; nil when the attribute can't be read. */
   var visibleRows: [Self]? { get }
   var rowCount: Int? { get }
@@ -44,15 +45,18 @@ func nonEmpty(_ value: String?) -> String? {
 
 /// The queue table inside Music's play-queue container: headerContainer › scroller › table.
 func queueTable<N: Node>(in container: N) -> N? {
-  for area in container.children where area.identifier == "scroller" {
-    if let table = area.children.first(where: { $0.role == "AXTable" }) { return table }
+  for area in container.children ?? [] where area.identifier == "scroller" {
+    if let table = area.children?.first(where: { $0.role == "AXTable" }) { return table }
   }
   return nil
 }
 
 enum WindowSearch<N: Node> {
   case found(N)
-  case notFound(sawQueueButton: Bool, complete: Bool)
+  /** Searched to the end: nothing failed, the budget held, no play-queue container was seen. */
+  case searched(sawQueueButton: Bool)
+  /** The budget ran out, a read failed, or Music's container no longer holds the table. */
+  case inconclusive
 }
 
 func searchWindow<N: Node>(_ window: N) -> WindowSearch<N> {
@@ -60,15 +64,19 @@ func searchWindow<N: Node>(_ window: N) -> WindowSearch<N> {
   var seen = 0
   var sawQueueButton = false
   while !pending.isEmpty {
-    if seen >= maxElementsPerWindow { return .notFound(sawQueueButton: sawQueueButton, complete: false) }
+    if seen >= maxElementsPerWindow { return .inconclusive }
     let node = pending.removeFirst()
     seen += 1
-    if node.identifier == "headerContainer", let table = queueTable(in: node) { return .found(table) }
+    if node.identifier == "headerContainer" {
+      guard let table = queueTable(in: node) else { return .inconclusive }
+      return .found(table)
+    }
     if let id = node.identifier, id.hasSuffix("queueButton") { sawQueueButton = true }
     if let role = node.role, leafRoles.contains(role) { continue }
-    pending.append(contentsOf: node.children)
+    guard let children = node.children else { return .inconclusive }
+    pending.append(contentsOf: children)
   }
-  return .notFound(sawQueueButton: sawQueueButton, complete: true)
+  return .searched(sawQueueButton: sawQueueButton)
 }
 
 func readRow<N: Node>(_ row: N) -> QueueRow {
@@ -83,7 +91,7 @@ func readRow<N: Node>(_ row: N) -> QueueRow {
         buttons.append(QueueButton(id: node.identifier, label: nonEmpty(node.title) ?? nonEmpty(node.descriptionText)))
         continue
       }
-      next.append(contentsOf: node.children)
+      next.append(contentsOf: node.children ?? [])
     }
     level = next
   }
@@ -93,10 +101,12 @@ func readRow<N: Node>(_ row: N) -> QueueRow {
   return QueueRow(texts: [texts.joined(separator: " ")].filter { !$0.isEmpty }, buttons: buttons)
 }
 
-/// Mini Player first: it is where the queue panel was observed.
+/// Mini Player first: it is where the queue panel was observed. Closed only when every window was
+/// searched to the end, a queue button was seen, and no panel was: anything less is unrecognised.
 func readQueue<N: Node>(windows: [N]) -> QueueRead {
   let ordered = windows.filter { $0.title == "Mini Player" } + windows.filter { $0.title != "Mini Player" }
-  var closed = false
+  var sawQueueButton = false
+  var conclusive = true
   for window in ordered {
     switch searchWindow(window) {
     case .found(let table):
@@ -108,9 +118,11 @@ func readQueue<N: Node>(windows: [N]) -> QueueRead {
         lastVisibleIndex: shown.last?.index,
         rowCount: table.rowCount
       )
-    case .notFound(let sawQueueButton, let complete):
-      if sawQueueButton && complete { closed = true }
+    case .searched(let button):
+      sawQueueButton = sawQueueButton || button
+    case .inconclusive:
+      conclusive = false
     }
   }
-  return QueueRead(kind: closed ? "closed" : "unrecognised")
+  return QueueRead(kind: conclusive && sawQueueButton ? "closed" : "unrecognised")
 }

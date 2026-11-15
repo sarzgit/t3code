@@ -355,7 +355,9 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
       case "unavailable":
         return this.operation === "import-history"
           ? "Listening history could not be saved. Try again."
-          : "The Music app did not respond. Try again.";
+          : this.operation === "native-queue"
+            ? "T3 Music Up Next didn't return Music's Up Next. Try again."
+            : "The Music app did not respond. Try again.";
     }
   }
 }

@@ -1152,6 +1152,7 @@ describe("MusicPlayer", () => {
           3,
           4,
         ),
+        panel([], 0, 0),
         { kind: "closed" },
         { kind: "unrecognised" },
         { kind: "unreadable" },
@@ -1233,6 +1234,8 @@ describe("MusicPlayer", () => {
           sections: [{ title: "Continue Playing", source: "From musics!", songs: ["Drawn"] }],
           complete: false,
         });
+        // An empty list is an empty queue.
+        assert.deepStrictEqual(yield* read, { _tag: "ok", sections: [], complete: true });
         for (const tag of [
           "panel-closed",
           "unrecognised",

@@ -538,7 +538,7 @@ const NATIVE_QUEUE_MESSAGES = {
   "panel-closed": "Open Up Next in Music to see what's next.",
   unrecognised: "T3 Code can't find Music's Up Next here. Open it in Music's Mini Player.",
   unreadable: "T3 Code found Music's Up Next but couldn't read its songs.",
-  "no-upcoming-visible": "Scroll Music's Up Next so its Continue Playing header shows.",
+  "no-upcoming-visible": "Scroll Music's Up Next to its upcoming songs.",
   "permission-needed":
     "Allow T3 Music Up Next in System Settings › Privacy & Security › Accessibility to show Music's Up Next.",
   "helper-missing": "Install the T3 Music Up Next helper to show Music's Up Next.",

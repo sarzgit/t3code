@@ -63,8 +63,8 @@ plays its own queue (**Play**, Play or Shuffle pressed in Music, or Autoplay), U
 Music's own Up Next panel shows, read by the small **T3 Music Up Next** helper app in
 `~/Applications`. Keep that panel open in Music, and allow **T3 Music Up Next** (not T3 Code) under
 **System Settings → Privacy & Security → Accessibility**; macOS asks once. That permission lets the
-helper read app windows, and its code only reads Music's Up Next. Only the songs Music's panel has
-on screen are listed.
+helper read and control other apps' windows; its code only reads Music's Up Next. Only the songs
+Music's panel has on screen are listed.
 The command palette also has
 **Music: Play/Pause**, **Next track**, and **Previous track**, bound by default to ⌘⌥/, ⌘⌥. and ⌘⌥,
 (Ctrl+Alt elsewhere); change them under **Settings → Keybindings**. The heart beside the song

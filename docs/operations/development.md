@@ -382,4 +382,5 @@ helper is missing. Build and install it with
 `apps/server/native/music-up-next/build.sh <folder>` and
 `apps/server/native/music-up-next/install.sh "<folder>/T3 Music Up Next.app"`; run
 `apps/server/native/music-up-next/test.sh` after changing the reader. Each new build has a new
-code identity, so macOS asks for Accessibility again.
+code identity: `install.sh --replace` resets the helper's Accessibility entry, and it has to be
+allowed again.

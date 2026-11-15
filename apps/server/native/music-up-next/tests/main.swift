@@ -6,7 +6,7 @@ struct Fixture: Node {
   var title: String? = nil
   var descriptionText: String? = nil
   var value: String? = nil
-  var children: [Fixture] = []
+  var children: [Fixture]? = []
   var visibleRows: [Fixture]? = nil
   var rowCount: Int? = nil
   var index: Int? = nil
@@ -57,6 +57,18 @@ check("closed", readQueue(windows: [Fixture(role: "AXWindow", title: "Mini Playe
 let busy = Fixture(role: "AXWindow", title: "Music", children: [queueToggle] + Array(repeating: Fixture(role: "AXGroup"), count: 500))
 check("budget exhausted is unrecognised", readQueue(windows: [busy]), QueueRead(kind: "unrecognised"))
 check("no button, no panel", readQueue(windows: [Fixture(role: "AXWindow")]), QueueRead(kind: "unrecognised"))
+
+// Music's container without the table it held (an update, a different layout) is not "closed".
+let reshaped = Fixture(role: "AXWindow", title: "Mini Player", children: [queueToggle, Fixture(role: "AXGroup", identifier: "headerContainer", children: [Fixture(role: "AXOutline")])])
+check("container without table", readQueue(windows: [reshaped]), QueueRead(kind: "unrecognised"))
+
+// A child list that failed to read leaves the search inconclusive, never "closed".
+let failing = Fixture(role: "AXWindow", title: "Mini Player", children: [queueToggle, Fixture(role: "AXGroup", children: nil)])
+check("failed read is not closed", readQueue(windows: [failing]), QueueRead(kind: "unrecognised"))
+
+// The Mini Player closed but another window cut short: unrecognised.
+let miniClosed = Fixture(role: "AXWindow", title: "Mini Player", children: [queueToggle])
+check("closed needs every window", readQueue(windows: [busy, miniClosed]), QueueRead(kind: "unrecognised"))
 
 // Found but its visible rows can't be read.
 let hidden = Fixture(role: "AXWindow", title: "Mini Player", children: [panel(rows, rowCount: 302, visible: false)])

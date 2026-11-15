@@ -648,7 +648,12 @@ function parseNativeQueue(read: typeof RawNativeRead.Type): MusicNativeQueue | n
   }
   const rows = read.rows ?? [];
   const start = rows.findIndex(opensQueue);
-  if (start < 0) return { _tag: "no-upcoming-visible" };
+  if (start < 0) {
+    // An empty list is an empty queue, not one scrolled out of view.
+    return read.rowCount === 0
+      ? { _tag: "ok", sections: [], complete: true }
+      : { _tag: "no-upcoming-visible" };
+  }
   const sections: Array<{ title: string; source: string | null; songs: Array<string> }> = [];
   let complete =
     typeof read.rowCount === "number" &&
@@ -1417,6 +1422,9 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     },
     Effect.scoped,
     helperLock.withPermits(1),
+    // The helper runs outside this process; a cancelled request must not free the lock while it
+    // still runs. Bounded by the launch timeout and the helper's own 10 s exit.
+    Effect.uninterruptible,
   );
 
   const nativeQueueCache = yield* Cache.makeWith((_trackId: string) => readNativeQueue(), {
