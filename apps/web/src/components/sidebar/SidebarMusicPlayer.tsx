@@ -1,4 +1,4 @@
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   formatTrackTime,
   musicPositionAt,
@@ -27,21 +27,71 @@ import {
   Volume2Icon,
   VolumeXIcon,
 } from "lucide-react";
-import { type CSSProperties, memo, useEffect, useRef, useState } from "react";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { type CSSProperties, memo, useContext, useEffect, useRef, useState } from "react";
 
 import { useNowSecond } from "~/hooks/useNowSecond";
-import { musicEnvironment, useMusicEnvironmentId, useReceivedMusicState } from "~/state/music";
+import {
+  musicEnvironment,
+  useMusicEnvironmentId,
+  useMusicQueueStatus,
+  useReceivedMusicState,
+} from "~/state/music";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { SidebarMenuButton } from "../ui/sidebar";
+import { toastManager } from "../ui/toast";
 import { MusicArtwork, MusicPanel } from "./MusicPlaylistPanel";
+import { reportMusicFailure } from "./musicQueueActions";
 
 export const SidebarMusicPlayer = memo(function SidebarMusicPlayer() {
   const environmentId = useMusicEnvironmentId();
-  return environmentId === null ? null : <MusicPlayer environmentId={environmentId} />;
+  return environmentId === null ? null : (
+    <>
+      <MusicPlayer environmentId={environmentId} />
+      <ReplacedQueueUndo environmentId={environmentId} />
+    </>
+  );
 });
+
+/** Every client offers Undo while the server holds an edited queue a new play replaced. */
+function ReplacedQueueUndo({ environmentId }: { environmentId: EnvironmentId }) {
+  const registry = useContext(RegistryContext);
+  const replaced = useMusicQueueStatus(environmentId)?.replaced ?? null;
+  const canUndo = useAtomValue(musicEnvironment.undoReplace.permissionAtom(environmentId));
+  const replacedId = canUndo ? (replaced?.replacedId ?? null) : null;
+  const replacedRevision = replaced?.replacedRevision ?? 0;
+  const byId = replaced?.byId ?? "";
+  const byRevision = replaced?.byRevision ?? 0;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors the server's Undo hold into the toast stack, which lives outside React; the server clears it on expiry or use.
+  useEffect(() => {
+    if (replacedId === null) return;
+    const toastId = toastManager.add({
+      type: "info",
+      title: "Up Next replaced",
+      timeout: REPLACED_TOAST_MS,
+      actionProps: {
+        children: "Undo",
+        onClick: () => {
+          toastManager.close(toastId);
+          void runAtomCommand(registry, musicEnvironment.undoReplace, {
+            environmentId,
+            input: { replacedId, replacedRevision, byId, byRevision },
+          }).then((result) => {
+            if (result._tag !== "Success") reportMusicFailure(result.cause);
+          });
+        },
+      },
+    });
+    return () => toastManager.close(toastId);
+  }, [registry, environmentId, replacedId, replacedRevision, byId, byRevision]);
+  return null;
+}
+
+/** The server's hold; it publishes the end, so this only bounds a client that missed it. */
+const REPLACED_TOAST_MS = 30_000;
 
 type ReadyState = Extract<MusicPlayerState, { _tag: "ready" }>;
 

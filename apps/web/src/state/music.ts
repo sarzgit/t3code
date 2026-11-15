@@ -3,13 +3,14 @@ import {
   createMusicEnvironmentAtoms,
   type ReceivedMusicState,
 } from "@t3tools/client-runtime/state/music";
-import type { ClientSettings, EnvironmentId } from "@t3tools/contracts";
+import type { ClientSettings, EnvironmentId, MusicQueueStatus } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 import { useClientSettings } from "../hooks/useSettings";
 import { type EnvironmentPresentation, usePrimaryEnvironment } from "./environments";
+import { useEnvironmentQuery } from "./query";
 
 export const musicEnvironment = createMusicEnvironmentAtoms(connectionAtomRuntime);
 
@@ -49,4 +50,11 @@ export function musicEnvironmentIdFor(
 
 export function useMusicEnvironmentId(): EnvironmentId | null {
   return musicEnvironmentIdFor(useMusicPlayerEnabled(), usePrimaryEnvironment());
+}
+
+/** Null while it loads, and from a server that has no T3 queue. */
+export function useMusicQueueStatus(environmentId: EnvironmentId | null): MusicQueueStatus | null {
+  return useEnvironmentQuery(
+    environmentId === null ? null : musicEnvironment.queue({ environmentId, input: {} }),
+  ).data;
 }

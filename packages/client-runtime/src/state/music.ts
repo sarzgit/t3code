@@ -4,6 +4,8 @@ import {
   type MusicPlayerState,
   type MusicPlaylist,
   type MusicPlaylistPreferences,
+  type MusicQueueActive,
+  type MusicQueueView,
   type MusicRepeatMode,
   type MusicUpNextInput,
   WS_METHODS,
@@ -247,6 +249,8 @@ export function formatTrackTime(totalSeconds: number): string {
 
 export type MusicUpNextSource =
   | { readonly _tag: "nothing-playing" }
+  /** T3 runs the queue, formula or edited: its own list, editable even under repeat one. */
+  | { readonly _tag: "queue"; readonly active: MusicQueueActive }
   /** Music runs its own queue (Play or Shuffle in Music, Autoplay); its Up Next panel is read. */
   | { readonly _tag: "native"; readonly trackId: string }
   /** Repeat one: the current song plays again until someone skips. */
@@ -254,11 +258,16 @@ export type MusicUpNextSource =
   | { readonly _tag: "known"; readonly input: MusicUpNextInput };
 
 /**
- * T3's own list while T3 Code moves through a playlist itself, in its own shuffled order when
- * Music's shuffle is on (Music's flag decides each step, so it decides here too). Otherwise the
- * queue is Music's, read from its Up Next panel.
+ * An active T3 queue always wins. Without one (or from a server before queues), T3's own list
+ * while T3 Code moves through a playlist itself, in its own shuffled order when Music's shuffle
+ * is on (Music's flag decides each step, so it decides here too). Otherwise the queue is
+ * Music's, read from its Up Next panel.
  */
-export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
+export function musicUpNextSource(
+  state: MusicPlayerState,
+  active: MusicQueueActive | null = null,
+): MusicUpNextSource {
+  if (active !== null) return { _tag: "queue", active };
   if (state._tag !== "ready" || state.track === null || state.playback === "stopped") {
     return { _tag: "nothing-playing" };
   }
@@ -276,6 +285,22 @@ export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
       wrap: state.repeat === "all",
       ...(state.shuffle && from.shuffle !== undefined ? { shuffle: from.shuffle } : {}),
     },
+  };
+}
+
+/** Up Next re-reads the queue when its order, current entry or edited flag moves. */
+export function musicQueueViewRevision(active: MusicQueueActive): string {
+  return `${active.revision}:${active.currentKey}:${active.edited ? "e" : "f"}`;
+}
+
+/** The identity an edit names. The first edit of a formula queue sends back its song count. */
+export function musicQueueEditBase(
+  view: Pick<MusicQueueView, "id" | "revision" | "edited" | "sourceCount">,
+): { queueId: string; expectedRevision: number; sourceCount?: number } {
+  return {
+    queueId: view.id,
+    expectedRevision: view.revision,
+    ...(view.edited || view.sourceCount === undefined ? {} : { sourceCount: view.sourceCount }),
   };
 }
 

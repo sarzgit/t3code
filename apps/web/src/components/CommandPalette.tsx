@@ -75,6 +75,7 @@ import {
   MonitorIcon,
   PinIcon,
   PinOffIcon,
+  ListXIcon,
   PlayIcon,
   PlugIcon,
   SkipBackIcon,
@@ -119,7 +120,13 @@ import { readLocalApi } from "../localApi";
 import { configuredHostedAppUrl } from "../hostedPairing";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
-import { musicEnvironment, musicEnvironmentIdFor, useMusicPlayerEnabled } from "../state/music";
+import {
+  musicEnvironment,
+  musicEnvironmentIdFor,
+  useMusicPlayerEnabled,
+  useMusicQueueStatus,
+} from "../state/music";
+import { reportMusicFailure, useMusicQueueEdit } from "./sidebar/musicQueueActions";
 import { useMusicShortcuts } from "../shortcuts/useMusicShortcuts";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
@@ -711,6 +718,15 @@ function OpenCommandPaletteDialog(props: {
     environments.find((environment) => environment.environmentId === primaryEnvironmentId),
   );
   const canControlMusic = useAtomValue(musicEnvironment.control.permissionAtom(musicEnvironmentId));
+  const musicQueue = useMusicQueueStatus(musicEnvironmentId);
+  const canEditMusicQueue = useAtomValue(
+    musicEnvironment.editQueue.permissionAtom(musicEnvironmentId),
+  );
+  const canResumeMusicQueue = useAtomValue(
+    musicEnvironment.resumeQueue.permissionAtom(musicEnvironmentId),
+  );
+  const editMusicQueue = useMusicQueueEdit();
+  const resumeMusicQueue = useAtomCommand(musicEnvironment.resumeQueue);
   const supportsTriage = (environmentId: EnvironmentId | null) =>
     environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
       ?.environment.capabilities.triage === true;
@@ -1398,6 +1414,42 @@ function OpenCommandPaletteDialog(props: {
         },
       });
     }
+  }
+
+  const savedMusicQueue = musicQueue?.active === null ? musicQueue.saved : null;
+  if (
+    musicEnvironmentId !== null &&
+    canResumeMusicQueue &&
+    savedMusicQueue?.sourceMissing === false
+  ) {
+    actionItems.push({
+      kind: "action",
+      value: "action:music-resume-queue",
+      searchTerms: ["music", "queue", "up next", "resume", "continue", "saved"],
+      title: "Music: Resume queue",
+      description: [savedMusicQueue.trackName, savedMusicQueue.sourceName].join(" · "),
+      icon: <PlayIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        const result = await resumeMusicQueue({
+          environmentId: musicEnvironmentId,
+          input: { queueId: savedMusicQueue.id, revision: savedMusicQueue.revision },
+        });
+        if (result._tag !== "Success") reportMusicFailure(result.cause);
+      },
+    });
+  }
+  const activeMusicQueue = musicQueue?.active ?? null;
+  if (musicEnvironmentId !== null && canEditMusicQueue && activeMusicQueue !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:music-clear-upcoming",
+      searchTerms: ["music", "queue", "up next", "clear", "upcoming", "empty"],
+      title: "Music: Clear upcoming",
+      icon: <ListXIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await editMusicQueue(musicEnvironmentId, activeMusicQueue, { _tag: "clear-upcoming" });
+      },
+    });
   }
 
   if (activeThreadKey !== null && supportsThreadFind) {

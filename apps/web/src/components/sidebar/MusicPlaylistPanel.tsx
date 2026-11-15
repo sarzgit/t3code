@@ -1,3 +1,19 @@
+import {
+  DndContext,
+  type DragEndEvent,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { restrictToParentElement, restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { LegendList } from "@legendapp/list/react";
 import { useAtomValue } from "@effect/atom-react";
 import { useDebouncedValue } from "@tanstack/react-pacer";
@@ -5,6 +21,7 @@ import {
   arrangeMusicPlaylists,
   formatMusicDuration,
   formatTrackTime,
+  musicQueueViewRevision,
   musicUpNextSource,
 } from "@t3tools/client-runtime/state/music";
 import {
@@ -15,36 +32,51 @@ import {
   type MusicPlaylistPlacement,
   type MusicPlaylistPreferences,
   type MusicPlaylistTrack,
+  type MusicQueueActive,
+  type MusicQueueEdit,
+  type MusicQueueEntry,
+  type MusicSavedQueue,
+  type MusicSongRef,
   type MusicTrack,
   type ServerSettings,
 } from "@t3tools/contracts";
 import {
   AudioLinesIcon,
   ChevronLeftIcon,
+  EllipsisIcon,
   EyeOffIcon,
+  GripVerticalIcon,
   HeartIcon,
+  ListEndIcon,
+  ListStartIcon,
   MusicIcon,
   PinIcon,
   PinOffIcon,
   PlayIcon,
   Repeat1Icon,
   ShuffleIcon,
+  XIcon,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
-import { musicEnvironment } from "~/state/music";
+import { musicEnvironment, useMusicQueueStatus } from "~/state/music";
 import { useEnvironmentQuery } from "~/state/query";
+import { revisionedQuery } from "~/state/revisionedQuery";
 import { serverEnvironment } from "~/state/server";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { ScrollArea } from "../ui/scroll-area";
 import { Spinner } from "../ui/spinner";
+import { toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ListeningStats } from "./MusicListeningStats";
+import { reportMusicFailure, useMusicQueueEdit } from "./musicQueueActions";
 
 export function MusicArtwork({
   environmentId,
@@ -140,7 +172,7 @@ export function MusicPanel({
       {view.kind === "stats" ? (
         <ListeningStats environmentId={environmentId} />
       ) : view.kind === "up-next" ? (
-        <UpNext environmentId={environmentId} state={state} />
+        <UpNext environmentId={environmentId} state={state} controllable={controllable} />
       ) : view.kind === "songs" ? (
         <PlaylistSongs
           environmentId={environmentId}
@@ -214,11 +246,13 @@ function SongLine({
   detail,
   durationSec,
   playing,
+  repeating = false,
 }: {
   name: string;
   detail: string;
   durationSec: number;
   playing: boolean;
+  repeating?: boolean;
 }) {
   return (
     <>
@@ -230,6 +264,9 @@ function SongLine({
           <span className="block truncate text-xs text-muted-foreground">{detail}</span>
         ) : null}
       </span>
+      {repeating ? (
+        <Repeat1Icon className="size-3.5 shrink-0 text-muted-foreground" aria-label="Repeats" />
+      ) : null}
       {playing ? <AudioLinesIcon className="size-3.5 shrink-0" aria-label="Playing" /> : null}
       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
         {formatTrackTime(durationSec)}
@@ -239,7 +276,87 @@ function SongLine({
 }
 
 const SONG_BUTTON_CLASS =
-  "flex h-11 w-full items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-accent focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60";
+  "flex h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-60";
+
+/** A song row: the play button plus its menu, which shows on hover or focus. */
+const SONG_ROW_CLASS =
+  "group/song flex items-center rounded-md hover:bg-accent focus-within:bg-accent";
+const ROW_MENU_REVEAL_CLASS =
+  "flex shrink-0 pe-1 opacity-0 group-hover/song:opacity-100 group-focus-within/song:opacity-100 has-[[data-popup-open]]:opacity-100 any-pointer-coarse:opacity-100";
+
+type SongQueueAction = "play-next" | "add";
+
+/** What a song row needs to queue songs: the active T3 queue, or null when it can't. */
+interface SongQueueTarget {
+  readonly active: MusicQueueActive | null;
+  readonly onQueue: (action: SongQueueAction, song: MusicSongRef) => void;
+}
+
+function useSongQueueTarget(environmentId: EnvironmentId, controllable: boolean): SongQueueTarget {
+  const status = useMusicQueueStatus(environmentId);
+  const canEdit = useAtomValue(musicEnvironment.editQueue.permissionAtom(environmentId));
+  const edit = useMusicQueueEdit();
+  const active = controllable && canEdit ? (status?.active ?? null) : null;
+  return {
+    active,
+    onQueue: (action, song) => {
+      if (active === null) return;
+      void edit(environmentId, active, { _tag: action, songs: [song] }).then((ref) => {
+        if (ref === null) return;
+        toastManager.add({
+          type: "success",
+          title: action === "play-next" ? "Playing next" : "Added to Up Next",
+        });
+      });
+    },
+  };
+}
+
+const QUEUE_UNAVAILABLE_HINT = "Start playback from T3 Code to edit Up Next";
+
+function SongQueueMenu({
+  name,
+  song,
+  target,
+}: {
+  name: string;
+  song: MusicSongRef;
+  target: SongQueueTarget;
+}) {
+  const disabled = target.active === null;
+  const item = (action: SongQueueAction, icon: ReactNode, label: string) => {
+    const menuItem = (
+      <MenuItem disabled={disabled} onClick={() => target.onQueue(action, song)}>
+        {icon}
+        {label}
+      </MenuItem>
+    );
+    return disabled ? (
+      <Tooltip>
+        <TooltipTrigger render={<div />}>{menuItem}</TooltipTrigger>
+        <TooltipPopup side="left">{QUEUE_UNAVAILABLE_HINT}</TooltipPopup>
+      </Tooltip>
+    ) : (
+      menuItem
+    );
+  };
+  return (
+    <span className={ROW_MENU_REVEAL_CLASS}>
+      <Menu>
+        <MenuTrigger
+          render={<Button variant="ghost-muted" size="icon-xs" />}
+          aria-label={`More for ${name || "Untitled"}`}
+        >
+          <EllipsisIcon />
+        </MenuTrigger>
+        <MenuPopup align="end">
+          {item("play-next", <ListStartIcon />, "Play next")}
+          {item("add", <ListEndIcon />, "Add to Up Next")}
+        </MenuPopup>
+      </Menu>
+    </span>
+  );
+}
 
 const SONG_ROW_HEIGHT = 44;
 const SONG_LIST_MAX_HEIGHT = 288;
@@ -273,31 +390,31 @@ function PlaylistSongs({
       song.artist.toLocaleLowerCase().includes(needle),
   );
   const playable = controllable && canPlay;
+  const queueTarget = useSongQueueTarget(environmentId, controllable);
   const startPlaylist = (shuffle: boolean) =>
     void playPlaylist({ environmentId, input: { playlistId: playlist.id, shuffle } });
 
   const renderSong = (song: MusicPlaylistTrack) => {
     const playing = song.id === playingTrackId;
+    const ref = { playlistId: playlist.id, trackId: song.id, index: song.index };
     return (
-      <button
-        type="button"
-        disabled={!playable}
-        aria-current={playing ? "true" : undefined}
-        className={SONG_BUTTON_CLASS}
-        onClick={() =>
-          void playTrack({
-            environmentId,
-            input: { playlistId: playlist.id, trackId: song.id, index: song.index },
-          })
-        }
-      >
-        <SongLine
-          name={song.name}
-          detail={song.artist}
-          durationSec={song.durationSec}
-          playing={playing}
-        />
-      </button>
+      <div role="listitem" className={SONG_ROW_CLASS}>
+        <button
+          type="button"
+          disabled={!playable}
+          aria-current={playing ? "true" : undefined}
+          className={SONG_BUTTON_CLASS}
+          onClick={() => void playTrack({ environmentId, input: ref })}
+        >
+          <SongLine
+            name={song.name}
+            detail={song.artist}
+            durationSec={song.durationSec}
+            playing={playing}
+          />
+        </button>
+        <SongQueueMenu name={song.name} song={ref} target={queueTarget} />
+      </div>
     );
   };
 
@@ -364,10 +481,10 @@ function PlaylistSongs({
             data={songs}
             dataKey={search}
             initialScrollOffset={0}
-            // Rows only rerender for new data; the playing mark and permission live outside it.
-            extraData={`${playingTrackId}:${playable}`}
+            // Rows only rerender for new data; the playing mark, permission and queue live outside it.
+            extraData={`${playingTrackId}:${playable}:${queueTarget.active?.id ?? ""}:${queueTarget.active?.revision ?? ""}:${queueTarget.active?.edited ?? ""}`}
             keyExtractor={(song) => `${song.id}:${song.index}`}
-            renderItem={({ item }) => <div role="listitem">{renderSong(item)}</div>}
+            renderItem={({ item }) => renderSong(item)}
             estimatedItemSize={SONG_ROW_HEIGHT}
             drawDistance={SONG_ROW_HEIGHT * 8}
             style={{ height: "100%" }}
@@ -428,6 +545,7 @@ function LibrarySongs({
   const playTrack = useAtomCommand(musicEnvironment.playTrack);
   const canPlay = useAtomValue(musicEnvironment.playTrack.permissionAtom(environmentId));
   const playable = controllable && canPlay;
+  const queueTarget = useSongQueueTarget(environmentId, controllable);
   if (query === null || result.data === null) {
     return <QueryProblem error={query === null ? null : result.error} onRetry={result.refresh} />;
   }
@@ -442,30 +560,29 @@ function LibrarySongs({
     >
       <p className="px-2 pt-0.5 pb-1 text-xs text-muted-foreground">Songs</p>
       <ul className="flex flex-col">
-        {songs.map((song) => (
-          <li key={song.id}>
-            <button
-              type="button"
-              disabled={!playable}
-              aria-current={song.id === playingTrackId ? "true" : undefined}
-              className={SONG_BUTTON_CLASS}
-              // The library is the context: next and previous move through it, not the results.
-              onClick={() =>
-                void playTrack({
-                  environmentId,
-                  input: { playlistId, trackId: song.id, index: song.index },
-                })
-              }
-            >
-              <SongLine
-                name={song.name}
-                detail={[song.artist, song.album].filter(Boolean).join(" · ")}
-                durationSec={song.durationSec}
-                playing={song.id === playingTrackId}
-              />
-            </button>
-          </li>
-        ))}
+        {songs.map((song) => {
+          const ref = { playlistId, trackId: song.id, index: song.index };
+          return (
+            <li key={song.id} className={SONG_ROW_CLASS}>
+              <button
+                type="button"
+                disabled={!playable}
+                aria-current={song.id === playingTrackId ? "true" : undefined}
+                className={SONG_BUTTON_CLASS}
+                // The library is the context: next and previous move through it, not the results.
+                onClick={() => void playTrack({ environmentId, input: ref })}
+              >
+                <SongLine
+                  name={song.name}
+                  detail={[song.artist, song.album].filter(Boolean).join(" · ")}
+                  durationSec={song.durationSec}
+                  playing={song.id === playingTrackId}
+                />
+              </button>
+              <SongQueueMenu name={song.name} song={ref} target={queueTarget} />
+            </li>
+          );
+        })}
       </ul>
       {total > songs.length ? (
         <p className="px-2 pt-1 text-xs text-muted-foreground">
@@ -479,57 +596,427 @@ function LibrarySongs({
 function UpNext({
   environmentId,
   state,
+  controllable,
 }: {
   environmentId: EnvironmentId;
   state: MusicPlayerState;
+  controllable: boolean;
 }) {
-  const source = musicUpNextSource(state);
+  const status = useMusicQueueStatus(environmentId);
+  const canEdit = useAtomValue(musicEnvironment.editQueue.permissionAtom(environmentId));
+  const source = musicUpNextSource(state, status?.active ?? null);
   const query = useEnvironmentQuery(
     source._tag === "known"
       ? musicEnvironment.upNext({ environmentId, input: source.input })
       : null,
   );
-  if (source._tag === "nothing-playing") return <p className={EMPTY_TEXT_CLASS}>Nothing playing</p>;
-  if (source._tag === "repeating") {
+  if (source._tag === "queue") {
     return (
+      <QueueUpNext
+        environmentId={environmentId}
+        active={source.active}
+        repeatOne={state._tag === "ready" && state.repeat === "one"}
+        editable={controllable && canEdit}
+      />
+    );
+  }
+  const saved =
+    status?.saved != null ? (
+      <SavedQueueCard
+        environmentId={environmentId}
+        saved={status.saved}
+        controllable={controllable}
+      />
+    ) : null;
+  let list: ReactNode;
+  if (source._tag === "nothing-playing") {
+    list = saved === null ? <p className={EMPTY_TEXT_CLASS}>Nothing playing</p> : null;
+  } else if (source._tag === "repeating") {
+    list = (
       <p className={cn(EMPTY_TEXT_CLASS, "flex items-center justify-center gap-1.5")}>
         <Repeat1Icon className="size-3.5 shrink-0" aria-hidden />
         This song repeats
       </p>
     );
+  } else if (source._tag === "native") {
+    list = <NativeUpNext environmentId={environmentId} trackId={source.trackId} />;
+  } else if (query.data === null) {
+    list = <QueryProblem error={query.error} onRetry={query.refresh} />;
+  } else {
+    const { playlistName, tracks } = query.data;
+    const name = playlistName || "playlist";
+    const label =
+      tracks.length === 0
+        ? `Last song in ${name}`
+        : source.input.shuffle
+          ? `Shuffling ${name}`
+          : `Next in ${name}`;
+    list = (
+      <div className="flex flex-col gap-1">
+        <p className="truncate px-2 text-xs text-muted-foreground">{label}</p>
+        {tracks.length > 0 ? (
+          <ScrollArea className="max-h-64" scrollFade>
+            <ol className="flex flex-col" aria-label={label}>
+              {tracks.map((song) => (
+                <li key={`${song.id}:${song.index}`} className="flex h-11 items-center gap-2 px-2">
+                  <SongLine
+                    name={song.name}
+                    detail={song.artist}
+                    durationSec={song.durationSec}
+                    playing={false}
+                  />
+                </li>
+              ))}
+            </ol>
+          </ScrollArea>
+        ) : null}
+      </div>
+    );
   }
-  if (source._tag === "native") {
-    return <NativeUpNext environmentId={environmentId} trackId={source.trackId} />;
+  return saved === null ? (
+    list
+  ) : (
+    <div className="flex flex-col gap-2">
+      {saved}
+      {list}
+    </div>
+  );
+}
+
+/** The queue T3 last ran, offered when nothing T3-managed plays. Never plays by itself. */
+function SavedQueueCard({
+  environmentId,
+  saved,
+  controllable,
+}: {
+  environmentId: EnvironmentId;
+  saved: MusicSavedQueue;
+  controllable: boolean;
+}) {
+  const resume = useAtomCommand(musicEnvironment.resumeQueue);
+  const dismiss = useAtomCommand(musicEnvironment.dismissSavedQueue);
+  const canResume = useAtomValue(musicEnvironment.resumeQueue.permissionAtom(environmentId));
+  const canDismiss = useAtomValue(musicEnvironment.dismissSavedQueue.permissionAtom(environmentId));
+  const [sending, setSending] = useState(false);
+  const input = { queueId: saved.id, revision: saved.revision };
+  const send = (command: typeof resume) => {
+    setSending(true);
+    void command({ environmentId, input }).then((result) => {
+      setSending(false);
+      if (result._tag !== "Success") reportMusicFailure(result.cause);
+    });
+  };
+  const detail = saved.sourceMissing
+    ? "Playlist no longer in your library"
+    : [
+        saved.artist,
+        saved.sourceName,
+        saved.positionSec > 0 ? formatTrackTime(saved.positionSec) : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+  return (
+    <section aria-label="Resume" className="flex flex-col gap-1">
+      <p className="px-2 text-xs text-muted-foreground">Resume</p>
+      <div className="flex items-center gap-1 rounded-md border border-border py-1 ps-2 pe-1">
+        <span className="min-w-0 flex-1 leading-tight">
+          <span className="block truncate text-sm">{saved.trackName}</span>
+          {detail ? (
+            <span className="block truncate text-xs text-muted-foreground">{detail}</span>
+          ) : null}
+        </span>
+        {saved.sourceMissing ? null : (
+          <Button
+            variant="ghost-muted"
+            size="icon-sm"
+            aria-label={`Resume ${saved.trackName}`}
+            disabled={!controllable || !canResume || sending}
+            onClick={() => send(resume)}
+          >
+            <PlayIcon />
+          </Button>
+        )}
+        <Button
+          variant="ghost-muted"
+          size="icon-sm"
+          aria-label="Dismiss saved queue"
+          disabled={!canDismiss || sending}
+          onClick={() => send(dismiss)}
+        >
+          <XIcon />
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/** Where focus goes once the edit's new list lands: an entry's menu, or the header's (null). */
+interface PendingQueueFocus {
+  readonly key: string | null;
+  readonly fromRevision: number;
+}
+
+/** T3's own queue: the list that will play, editable from each row's menu or by dragging. */
+function QueueUpNext({
+  environmentId,
+  active,
+  repeatOne,
+  editable,
+}: {
+  environmentId: EnvironmentId;
+  active: MusicQueueActive;
+  repeatOne: boolean;
+  editable: boolean;
+}) {
+  const query = useEnvironmentQuery(
+    revisionedQuery(
+      musicEnvironment.queueView({ environmentId, input: { queueId: active.id } }),
+      musicQueueViewRevision(active),
+    ),
+  );
+  const edit = useMusicQueueEdit();
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  // A drop shows its order at once; the server's next list replaces it.
+  const [dropped, setDropped] = useState<{
+    readonly revision: number;
+    readonly keys: ReadonlyArray<string>;
+  } | null>(null);
+  const pendingFocus = useRef<PendingQueueFocus | null>(null);
+  const view = query.data;
+  // A failed refresh replaces the rows, so stale songs never stay listed as next.
+  if (query.error !== null || view === null) {
+    return <QueryProblem error={query.error} onRetry={query.refresh} />;
   }
-  if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
-  const { playlistName, tracks } = query.data;
-  const name = playlistName || "playlist";
+  const upcoming =
+    dropped !== null && dropped.revision === view.revision
+      ? dropped.keys.flatMap((key) => view.upcoming.find((entry) => entry.key === key) ?? [])
+      : view.upcoming;
+  const name = view.sourceName || "playlist";
   const label =
-    tracks.length === 0
+    view.totalUpcoming === 0
       ? `Last song in ${name}`
-      : source.input.shuffle
+      : view.shuffled
         ? `Shuffling ${name}`
         : `Next in ${name}`;
+
+  const run = async (change: MusicQueueEdit, focusKey: string | null | undefined) => {
+    if (focusKey !== undefined)
+      pendingFocus.current = { key: focusKey, fromRevision: view.revision };
+    const ref = await edit(environmentId, view, change);
+    if (ref === null) {
+      pendingFocus.current = null;
+      setDropped(null);
+      query.refresh();
+    }
+    return ref;
+  };
+  const claimFocus = (key: string | null) => (element: HTMLElement | null) => {
+    const pending = pendingFocus.current;
+    if (element === null || pending === null || pending.key !== key) return;
+    if (pending.fromRevision === view.revision) return;
+    pendingFocus.current = null;
+    element.focus();
+  };
+  const move = (entry: MusicQueueEntry, toIndex: number) =>
+    void run(
+      { _tag: "move", target: { key: entry.key, trackId: entry.trackId }, toIndex },
+      entry.key,
+    );
+  const remove = async (entry: MusicQueueEntry, index: number) => {
+    const focusKey = upcoming[index + 1]?.key ?? upcoming[index - 1]?.key ?? null;
+    const target = { key: entry.key, trackId: entry.trackId };
+    const ref = await run({ _tag: "remove", targets: [target] }, focusKey);
+    if (ref === null) return;
+    const undoTo: MusicQueueActive = {
+      id: ref.id,
+      revision: ref.revision,
+      edited: true,
+      currentKey: view.currentKey,
+    };
+    const toastId = toastManager.add({
+      type: "info",
+      title: "Removed from Up Next",
+      actionProps: {
+        children: "Undo",
+        onClick: () => {
+          toastManager.close(toastId);
+          void edit(environmentId, undoTo, { _tag: "undo-remove", target });
+        },
+      },
+    });
+  };
+  const onDragEnd = (event: DragEndEvent) => {
+    if (event.over === null || event.active.id === event.over.id) return;
+    const keys = upcoming.map((entry) => entry.key);
+    const from = keys.indexOf(String(event.active.id));
+    const to = keys.indexOf(String(event.over.id));
+    const entry = upcoming[from];
+    if (entry === undefined || to < 0) return;
+    setDropped({ revision: view.revision, keys: arrayMove(keys, from, to) });
+    void run(
+      { _tag: "move", target: { key: entry.key, trackId: entry.trackId }, toIndex: to },
+      undefined,
+    );
+  };
+
   return (
     <div className="flex flex-col gap-1">
-      <p className="truncate px-2 text-xs text-muted-foreground">{label}</p>
-      {tracks.length > 0 ? (
-        <ScrollArea className="max-h-64" scrollFade>
-          <ol className="flex flex-col" aria-label={label}>
-            {tracks.map((song) => (
-              <li key={`${song.id}:${song.index}`} className="flex h-11 items-center gap-2 px-2">
-                <SongLine
-                  name={song.name}
-                  detail={song.artist}
-                  durationSec={song.durationSec}
-                  playing={false}
-                />
-              </li>
-            ))}
-          </ol>
-        </ScrollArea>
+      <div className="flex items-center gap-1 ps-2">
+        <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{label}</p>
+        {editable ? (
+          <Menu>
+            <MenuTrigger
+              render={<Button variant="ghost-muted" size="icon-xs" ref={claimFocus(null)} />}
+              aria-label="Up Next options"
+            >
+              <EllipsisIcon />
+            </MenuTrigger>
+            <MenuPopup align="end">
+              <MenuItem
+                disabled={view.totalUpcoming === 0}
+                onClick={() => void run({ _tag: "clear-upcoming" }, null)}
+              >
+                Clear upcoming
+              </MenuItem>
+              {view.edited || view.shuffled ? (
+                <MenuItem onClick={() => void run({ _tag: "reset" }, null)}>
+                  Reset to playlist order
+                </MenuItem>
+              ) : null}
+            </MenuPopup>
+          </Menu>
+        ) : null}
+      </div>
+      <ScrollArea className="max-h-72" scrollFade>
+        {view.current !== null ? (
+          <div className="flex h-11 items-center gap-2 ps-2 pe-1" aria-current="true">
+            <SongLine
+              name={view.current.name}
+              detail={view.current.artist}
+              durationSec={view.current.durationSec}
+              playing
+              repeating={repeatOne}
+            />
+            {/* Keeps the length in line with the rows below, which end in a menu. */}
+            {editable ? <span aria-hidden className="w-12 shrink-0" /> : null}
+          </div>
+        ) : null}
+        {upcoming.length > 0 ? (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            modifiers={[restrictToVerticalAxis, restrictToParentElement]}
+            onDragEnd={onDragEnd}
+          >
+            <SortableContext
+              items={upcoming.map((entry) => entry.key)}
+              strategy={verticalListSortingStrategy}
+            >
+              <ol className="flex flex-col" aria-label={label}>
+                {upcoming.map((entry, index) => (
+                  <QueueEntryRow
+                    key={entry.key}
+                    entry={entry}
+                    editable={editable}
+                    isFirst={index === 0}
+                    isLast={index >= view.totalUpcoming - 1}
+                    menuRef={claimFocus(entry.key)}
+                    onMove={(toIndex) => move(entry, toIndex)}
+                    onMoveBy={(steps) => move(entry, index + steps)}
+                    onRemove={() => void remove(entry, index)}
+                  />
+                ))}
+              </ol>
+            </SortableContext>
+          </DndContext>
+        ) : null}
+      </ScrollArea>
+      {view.totalUpcoming > upcoming.length ? (
+        <p className="px-2 text-xs text-muted-foreground">
+          {(view.totalUpcoming - upcoming.length).toLocaleString()} more
+        </p>
       ) : null}
     </div>
+  );
+}
+
+function QueueEntryRow({
+  entry,
+  editable,
+  isFirst,
+  isLast,
+  menuRef,
+  onMove,
+  onMoveBy,
+  onRemove,
+}: {
+  entry: MusicQueueEntry;
+  editable: boolean;
+  isFirst: boolean;
+  isLast: boolean;
+  menuRef: (element: HTMLElement | null) => void;
+  onMove: (toIndex: number) => void;
+  onMoveBy: (steps: number) => void;
+  onRemove: () => void;
+}) {
+  const { listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({ id: entry.key, disabled: !editable });
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+      aria-disabled={entry.unavailable || undefined}
+      className={cn(
+        SONG_ROW_CLASS,
+        "h-11 gap-1 ps-2",
+        entry.unavailable && "text-muted-foreground",
+        isDragging && "relative z-10 bg-accent shadow-md",
+      )}
+    >
+      <SongLine
+        name={entry.name}
+        detail={entry.artist}
+        durationSec={entry.durationSec}
+        playing={false}
+      />
+      {editable ? (
+        <>
+          <span
+            ref={setActivatorNodeRef}
+            {...listeners}
+            aria-hidden
+            className="invisible flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/70 group-hover/song:visible hover:text-foreground active:cursor-grabbing any-pointer-coarse:visible"
+          >
+            <GripVerticalIcon className="size-3.5" />
+          </span>
+          <span className={ROW_MENU_REVEAL_CLASS}>
+            <Menu>
+              <MenuTrigger
+                render={<Button variant="ghost-muted" size="icon-xs" ref={menuRef} />}
+                aria-label={`Edit ${entry.name || "Untitled"} in Up Next`}
+              >
+                <EllipsisIcon />
+              </MenuTrigger>
+              <MenuPopup align="end">
+                <MenuItem disabled={isFirst} onClick={() => onMove(0)}>
+                  Move to top
+                </MenuItem>
+                <MenuItem disabled={isFirst} onClick={() => onMoveBy(-1)}>
+                  Move up
+                </MenuItem>
+                <MenuItem disabled={isLast} onClick={() => onMoveBy(1)}>
+                  Move down
+                </MenuItem>
+                <MenuSeparator />
+                <MenuItem variant="destructive" onClick={onRemove}>
+                  Remove
+                </MenuItem>
+              </MenuPopup>
+            </Menu>
+          </span>
+        </>
+      ) : null}
+    </li>
   );
 }
 

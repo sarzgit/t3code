@@ -5,6 +5,7 @@ import {
   arrangeMusicPlaylists,
   formatTrackTime,
   musicPositionAt,
+  musicQueueEditBase,
   musicUpNextSource,
   nextRepeatMode,
   parseMusicHistoryCsv,
@@ -57,6 +58,31 @@ describe("musicUpNextSource", () => {
     ["the song again under repeat one", ready({ playingFrom, repeat: "one" }), "repeating"],
   ] as const)("%s", (_name, state, expected) => {
     expect(musicUpNextSource(state)._tag).toBe(expected);
+  });
+
+  it("lists an active T3 queue over Music's shuffle and repeat one", () => {
+    const active = { id: "qabc123", revision: 2, edited: false, currentKey: "s4" };
+    for (const state of [
+      ready({ playingFrom, shuffle: true }),
+      ready({ playingFrom, repeat: "one" }),
+      ready({ playlistId: playingFrom.playlistId }),
+    ]) {
+      expect(musicUpNextSource(state, active)).toEqual({ _tag: "queue", active });
+    }
+    expect(musicUpNextSource(ready({ playingFrom, repeat: "one" }), null)._tag).toBe("repeating");
+  });
+
+  it("sends a formula queue's song count with its first edit only", () => {
+    const view = { id: "qabc123", revision: 3, sourceCount: 120 };
+    expect(musicQueueEditBase({ ...view, edited: false })).toEqual({
+      queueId: "qabc123",
+      expectedRevision: 3,
+      sourceCount: 120,
+    });
+    expect(musicQueueEditBase({ ...view, edited: true })).toEqual({
+      queueId: "qabc123",
+      expectedRevision: 3,
+    });
   });
 
   it("wraps only under repeat all", () => {
