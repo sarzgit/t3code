@@ -10,6 +10,7 @@ import {
   type MusicLibrarySong,
   type MusicListTracksInput,
   type MusicNativeQueue,
+  type MusicNativeQueueInput,
   type MusicPlayerState,
   type MusicPlaylists,
   type MusicPlaylistTrack,
@@ -23,6 +24,7 @@ import {
   type MusicUpNextInput,
   MUSIC_LIBRARY_SEARCH_LIMIT,
 } from "@t3tools/contracts";
+import * as NodeOS from "node:os";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
@@ -62,7 +64,9 @@ export class MusicPlayer extends Context.Service<
     /** The songs T3 Code will play after the one at `index`, as STEP_SCRIPT moves on. */
     readonly upNext: (input: MusicUpNextInput) => Effect.Effect<MusicUpNext, MusicError>;
     /** What Music's own Up Next panel shows, while Music runs its own queue. */
-    readonly nativeQueue: Effect.Effect<MusicNativeQueue, MusicError>;
+    readonly nativeQueue: (
+      input: MusicNativeQueueInput,
+    ) => Effect.Effect<MusicNativeQueue, MusicError>;
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
     readonly stats: (input: MusicStatsInput) => Effect.Effect<MusicStats, MusicError>;
@@ -390,64 +394,6 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   return "ok:" + target + ":" + list.ids[target] + ":" + (Music.shuffleEnabled() ? "on" : "off");
 }${SONGS_JXA}`;
 
-// Music's scripting has no queue, so this reads the rows its Up Next panel shows, through
-// Accessibility. It only reads, finds the panel by Music's own identifiers rather than text, and
-// returns labels only. Music builds the panel only while it is open.
-const NATIVE_QUEUE_SCRIPT = `function run() {
-  if (!Application("Music").running()) return JSON.stringify({ kind: "not-running" });
-  const found = Application("System Events").processes.whose({ bundleIdentifier: "com.apple.Music" })();
-  if (found.length === 0) return JSON.stringify({ kind: "not-running" });
-  const attr = (el, name) => { try { return el.attributes.byName(name).value(); } catch (error) { return null; } };
-  const tableIn = (el) => {
-    try {
-      for (const area of el.scrollAreas()) {
-        if (attr(area, "AXIdentifier") === "scroller" && area.tables().length > 0) return area.tables()[0];
-      }
-    } catch (error) {}
-    return null;
-  };
-  const leaves = { AXTable: 1, AXOutline: 1, AXList: 1, AXRow: 1, AXBrowser: 1, AXWebArea: 1, AXMenuBar: 1 };
-  const pending = found[0].windows();
-  let table = null;
-  let queueButton = false;
-  for (let seen = 0; pending.length > 0 && seen < 200 && table === null; seen++) {
-    const el = pending.shift();
-    const id = attr(el, "AXIdentifier");
-    if (id === "headerContainer") table = tableIn(el);
-    if (typeof id === "string" && /queueButton$/.test(id)) queueButton = true;
-    if (table !== null) break;
-    let role = null;
-    try { role = el.role(); } catch (error) {}
-    if (leaves[role]) continue;
-    try { for (const child of el.uiElements()) pending.push(child); } catch (error) {}
-  }
-  if (table === null) return JSON.stringify({ kind: queueButton ? "closed" : "unrecognised" });
-  const visible = attr(table, "AXVisibleRows");
-  if (!Array.isArray(visible)) return JSON.stringify({ kind: "unrecognised" });
-  const clip = (value) => (typeof value === "string" ? value.slice(0, 500) : null);
-  const rows = visible.slice(0, 80).map((row) => {
-    const texts = [];
-    const buttons = [];
-    let cells = [];
-    try { cells = row.uiElements(); } catch (error) {}
-    for (const cell of cells) {
-      try { for (const text of cell.staticTexts()) { const value = clip(text.value()); if (value !== null) texts.push(value); } } catch (error) {}
-      try {
-        for (const button of cell.buttons()) {
-          let label = null;
-          try { label = clip(button.name()) || clip(button.description()); } catch (error) {}
-          buttons.push({ id: clip(attr(button, "AXIdentifier")), label: label });
-        }
-      } catch (error) {}
-    }
-    return { texts: texts, buttons: buttons };
-  });
-  const last = visible.length > 0 ? attr(visible[visible.length - 1], "AXIndex") : null;
-  let rowCount = null;
-  try { rowCount = table.rows.length; } catch (error) {}
-  return JSON.stringify({ kind: "panel", rows: rows, lastVisibleIndex: last, rowCount: rowCount });
-}`;
-
 const CONTROL_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   switch (argv[0]) {
@@ -622,26 +568,6 @@ const RawUpNext = Schema.Struct({
 const decodeRawUpNext = Schema.decodeUnknownOption(Schema.fromJsonString(RawUpNext));
 const UP_NEXT_LIMIT = 25;
 
-const RawNativeQueue = Schema.Struct({
-  kind: Schema.String,
-  rows: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        texts: Schema.Array(Schema.String),
-        buttons: Schema.Array(
-          Schema.Struct({ id: Schema.NullOr(Schema.String), label: Schema.NullOr(Schema.String) }),
-        ),
-      }),
-    ),
-  ),
-  lastVisibleIndex: Schema.optional(Schema.NullOr(Schema.Number)),
-  rowCount: Schema.optional(Schema.NullOr(Schema.Number)),
-});
-const decodeRawNativeQueue = Schema.decodeUnknownOption(Schema.fromJsonString(RawNativeQueue));
-/** One read of Music's panel serves every client asking at about the same time. */
-const NATIVE_QUEUE_SHARE = Duration.seconds(2);
-const NATIVE_QUEUE_TIMEOUT = Duration.seconds(8);
-
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
 const seconds = (value: number | null | undefined) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
@@ -664,64 +590,86 @@ const playlistTracks = (tracks: typeof RawTracks.Type.tracks): Array<MusicPlayli
         ];
   });
 
-type RawNativeRow = NonNullable<typeof RawNativeQueue.Type.rows>[number];
+// Music's scripting has no queue, so a separate helper app (apps/server/native/music-up-next) reads
+// the rows Music's Up Next panel shows through Accessibility. T3 launches it through LaunchServices
+// so macOS holds the helper, not T3 Code, responsible: a grant there never reaches T3's own
+// processes or the agents it runs.
+/** The helper exits on its own after 10 s; this only bounds the launch around it. */
+const NATIVE_QUEUE_LAUNCH_TIMEOUT = Duration.seconds(15);
+const MAX_NATIVE_QUEUE_BYTES = 512 * 1024;
+/** One read of Music's panel serves every client asking about the same song at about once. */
+const NATIVE_QUEUE_SHARE = Duration.seconds(2);
 
-/** Music marks a section header with its Clear (`action`) or source (`from`) button. */
-const isQueueHeader = (row: RawNativeRow) =>
-  row.buttons.some((button) => button.id === "action" || button.id === "from");
+const RawNativeRow = Schema.Struct({
+  texts: Schema.Array(Schema.String),
+  buttons: Schema.Array(
+    Schema.Struct({
+      id: Schema.optional(Schema.NullOr(Schema.String)),
+      label: Schema.optional(Schema.NullOr(Schema.String)),
+    }),
+  ),
+});
+type RawNativeRow = typeof RawNativeRow.Type;
+const RawNativeRead = Schema.Struct({
+  kind: Schema.String,
+  rows: Schema.optional(Schema.Array(RawNativeRow)),
+  lastVisibleIndex: Schema.optional(Schema.NullOr(Schema.Number)),
+  rowCount: Schema.optional(Schema.NullOr(Schema.Number)),
+});
+const decodeRawNativeResponse = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ request: Schema.String, read: RawNativeRead })),
+);
 
-/** Music's panel rows as Up Next sections; rows before the first header are history. */
-function parseNativeQueue(stdout: string): MusicNativeQueue | null {
-  const raw = Option.getOrNull(decodeRawNativeQueue(stdout));
-  if (raw === null) return null;
-  switch (raw.kind) {
+const rowLabel = (row: RawNativeRow) => row.texts.find((value) => value.trim() !== "");
+/** Music gives each song its More button (`actionButton`); other rows are headers. */
+const isQueueSong = (row: RawNativeRow) =>
+  row.buttons.some((button) => button.id === "actionButton");
+/** The header that opens Music's queue carries its Clear (`action`) or source (`from`) button. */
+const opensQueue = (row: RawNativeRow) =>
+  !isQueueSong(row) && row.buttons.some((button) => button.id === "action" || button.id === "from");
+
+/** The helper's read as Up Next; rows before the header that opens the queue are history. */
+function parseNativeQueue(read: typeof RawNativeRead.Type): MusicNativeQueue | null {
+  switch (read.kind) {
     case "not-running":
       return { _tag: "not-running" };
     case "closed":
       return { _tag: "panel-closed" };
     case "unrecognised":
       return { _tag: "unrecognised" };
+    case "unreadable":
+      return { _tag: "unreadable" };
+    case "permission-needed":
+      return { _tag: "permission-needed" };
     case "panel":
       break;
     default:
       return null;
   }
-  const rows = raw.rows ?? [];
-  const start = rows.findIndex(isQueueHeader);
+  const rows = read.rows ?? [];
+  const start = rows.findIndex(opensQueue);
   if (start < 0) return { _tag: "no-upcoming-visible" };
   const sections: Array<{ title: string; source: string | null; songs: Array<string> }> = [];
   let complete =
-    typeof raw.rowCount === "number" &&
-    typeof raw.lastVisibleIndex === "number" &&
-    raw.lastVisibleIndex >= raw.rowCount - 1;
+    typeof read.rowCount === "number" &&
+    typeof read.lastVisibleIndex === "number" &&
+    read.lastVisibleIndex >= read.rowCount - 1;
   for (const row of rows.slice(start)) {
-    if (isQueueHeader(row)) {
-      const source = row.buttons.find((button) => button.id === "from")?.label ?? null;
-      sections.push({
-        title: text(row.texts[0]),
-        source: source === null ? null : text(source),
-        songs: [],
-      });
-      continue;
-    }
-    const label = row.texts.find((value) => value.trim() !== "");
+    const label = rowLabel(row);
     // A row Music has not drawn yet ends what can be read.
     if (label === undefined) {
       complete = false;
       break;
     }
-    sections.at(-1)!.songs.push(text(label));
+    if (isQueueSong(row)) {
+      sections.at(-1)!.songs.push(text(label));
+      continue;
+    }
+    const source = row.buttons.find((button) => button.id === "from")?.label ?? null;
+    sections.push({ title: text(label), source: source === null ? null : text(source), songs: [] });
   }
   return { _tag: "ok", sections, complete };
 }
-
-/** Which macOS grant a failed read lacks, from osascript's error. */
-const nativeQueueDenial = (stderr: string): "accessibility" | "automation" | null =>
-  /-1743\b/.test(stderr)
-    ? "automation"
-    : /-1719\b|-25211\b|assistive access/i.test(stderr)
-      ? "accessibility"
-      : null;
 
 /** Lowercase, without accents, with runs of whitespace collapsed. */
 const fold = (value: string) =>
@@ -1012,7 +960,7 @@ function makeLineSplitter(onLine: (line: string) => void) {
   };
 }
 
-const make = Effect.gen(function* () {
+const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNextHelper: string }) {
   const platform = yield* HostProcess.Platform;
   const runner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -1420,35 +1368,59 @@ const make = Effect.gen(function* () {
     } satisfies MusicUpNext;
   });
 
-  const readNativeQueue = Effect.fn("MusicPlayer.readNativeQueue")(function* () {
-    if (!supported)
-      return yield* new MusicError({ operation: "native-queue", reason: "unsupported" });
-    const output = yield* runner
-      .run({
-        command: "osascript",
-        args: ["-l", "JavaScript", "-e", JXA_NO_DOCK_ICON + NATIVE_QUEUE_SCRIPT],
-        timeout: NATIVE_QUEUE_TIMEOUT,
-        maxOutputBytes: 256 * 1024,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new MusicError({ operation: "native-queue", reason: "unavailable", cause }),
-        ),
-      );
-    if (output.code !== 0) {
-      const grant = nativeQueueDenial(output.stderr);
-      if (grant !== null) return { _tag: "permission-needed", grant } satisfies MusicNativeQueue;
-      return yield* new MusicError({ operation: "native-queue", reason: "unavailable" });
-    }
-    const queue = parseNativeQueue(output.stdout.trim());
-    if (queue === null) {
-      return yield* new MusicError({ operation: "native-queue", reason: "unavailable" });
-    }
-    return queue;
-  });
+  // One helper at a time, so a slow read never overlaps the next.
+  const helperLock = yield* Semaphore.make(1);
+  const readNativeQueue = Effect.fn("MusicPlayer.readNativeQueue")(
+    function* () {
+      if (!supported) {
+        return yield* new MusicError({ operation: "native-queue", reason: "unsupported" });
+      }
+      const unavailable = (cause?: unknown) =>
+        new MusicError({ operation: "native-queue", reason: "unavailable", cause });
+      const installed = yield* fileSystem
+        .exists(options.upNextHelper)
+        .pipe(Effect.orElseSucceed(() => false));
+      if (!installed) return { _tag: "helper-missing" } satisfies MusicNativeQueue;
+      const directory = yield* fileSystem
+        .makeTempDirectoryScoped({ prefix: "t3-music-up-next-" })
+        .pipe(Effect.mapError(unavailable));
+      const output = path.join(directory, "queue.json");
+      const request = (yield* Effect.all([newSeed, newSeed, newSeed])).join("-");
+      // LaunchServices, not a child process, so the helper is responsible for itself.
+      const launched = yield* runner
+        .run({
+          command: "open",
+          args: [
+            "-g",
+            "-n",
+            "-W",
+            "--env",
+            `T3_MUSIC_UP_NEXT_OUT=${output}`,
+            "--env",
+            `T3_MUSIC_UP_NEXT_REQUEST=${request}`,
+            "--env",
+            "T3_MUSIC_UP_NEXT_PROMPT=1",
+            options.upNextHelper,
+          ],
+          timeout: NATIVE_QUEUE_LAUNCH_TIMEOUT,
+        })
+        .pipe(Effect.mapError(unavailable));
+      if (launched.code !== 0) return yield* unavailable();
+      const info = yield* fileSystem.stat(output).pipe(Effect.mapError(unavailable));
+      if (Number(info.size) > MAX_NATIVE_QUEUE_BYTES) return yield* unavailable();
+      const answer = yield* fileSystem.readFileString(output).pipe(Effect.mapError(unavailable));
+      const raw = Option.getOrNull(decodeRawNativeResponse(answer));
+      // Only this request's answer counts.
+      if (raw === null || raw.request !== request) return yield* unavailable();
+      const queue = parseNativeQueue(raw.read);
+      return queue === null ? yield* unavailable() : queue;
+    },
+    Effect.scoped,
+    helperLock.withPermits(1),
+  );
 
-  const nativeQueueCache = yield* Cache.makeWith((_: "queue") => readNativeQueue(), {
-    capacity: 1,
+  const nativeQueueCache = yield* Cache.makeWith((_trackId: string) => readNativeQueue(), {
+    capacity: 4,
     timeToLive: () => NATIVE_QUEUE_SHARE,
   });
 
@@ -1620,7 +1592,10 @@ const make = Effect.gen(function* () {
     playTrack,
     searchLibrary,
     upNext,
-    nativeQueue: Cache.get(nativeQueueCache, "queue"),
+    // Keyed by song, so a song change never gets the previous song's snapshot.
+    nativeQueue: Effect.fn("MusicPlayer.nativeQueue")(function* (input: MusicNativeQueueInput) {
+      return yield* Cache.get(nativeQueueCache, input.trackId ?? "none");
+    }),
     control,
     artwork,
     stats: Effect.fn("MusicPlayer.stats")(function* (input: MusicStatsInput) {
@@ -1642,4 +1617,15 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(MusicPlayer, make);
+export const layerWith = (options: { readonly upNextHelper: string }) =>
+  Layer.effect(MusicPlayer, make(options));
+
+export const layer = Layer.effect(
+  MusicPlayer,
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    return yield* make({
+      upNextHelper: path.join(NodeOS.homedir(), "Applications", "T3 Music Up Next.app"),
+    });
+  }),
+);

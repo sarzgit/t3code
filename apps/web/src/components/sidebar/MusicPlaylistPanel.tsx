@@ -536,15 +536,12 @@ function UpNext({
 const NATIVE_QUEUE_MESSAGES = {
   "not-running": "Nothing playing",
   "panel-closed": "Open Up Next in Music to see what's next.",
-  unrecognised: "T3 Code can't read Music's Up Next here. Open it in Music's Mini Player.",
-  "no-upcoming-visible": "Scroll Music's Up Next to the upcoming songs.",
-} as const;
-
-const NATIVE_QUEUE_GRANTS = {
-  accessibility:
-    "Allow T3 Code in System Settings › Privacy & Security › Accessibility to show Music's Up Next.",
-  automation:
-    "Allow T3 Code to control System Events in System Settings › Privacy & Security › Automation to show Music's Up Next.",
+  unrecognised: "T3 Code can't find Music's Up Next here. Open it in Music's Mini Player.",
+  unreadable: "T3 Code found Music's Up Next but couldn't read its songs.",
+  "no-upcoming-visible": "Scroll Music's Up Next so its Continue Playing header shows.",
+  "permission-needed":
+    "Allow T3 Music Up Next in System Settings › Privacy & Security › Accessibility to show Music's Up Next.",
+  "helper-missing": "Install the T3 Music Up Next helper to show Music's Up Next.",
 } as const;
 
 /** Keys for labels that can repeat: the label and how many times it came before. */
@@ -568,15 +565,22 @@ function NativeUpNext({
   const query = useEnvironmentQuery(
     musicEnvironment.nativeQueue({ environmentId, input: { trackId } }),
   );
-  if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
-  const queue = query.data;
-  if (queue._tag === "permission-needed") {
-    return <p className={EMPTY_TEXT_CLASS}>{NATIVE_QUEUE_GRANTS[queue.grant]}</p>;
+  // A failed refresh replaces the rows, so stale songs never stay listed as next.
+  if (query.error !== null || query.data === null) {
+    return <QueryProblem error={query.error} onRetry={query.refresh} />;
   }
-  if (queue._tag !== "ok")
+  const queue = query.data;
+  if (queue._tag !== "ok") {
     return <p className={EMPTY_TEXT_CLASS}>{NATIVE_QUEUE_MESSAGES[queue._tag]}</p>;
+  }
   if (queue.sections.every((section) => section.songs.length === 0)) {
-    return <p className={EMPTY_TEXT_CLASS}>Nothing up next in Music</p>;
+    return (
+      <p className={EMPTY_TEXT_CLASS}>
+        {queue.complete
+          ? "Nothing up next in Music"
+          : "T3 Code can't read Music's upcoming songs yet."}
+      </p>
+    );
   }
   return (
     <div className="flex flex-col gap-1">

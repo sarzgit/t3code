@@ -372,3 +372,14 @@ passed as `--wsl-runtime`; see the
 Add `--signed` after configuring the platform credentials in the
 [release runbook](./release.md). macOS passkeys need a signed, provisioned app; follow the
 [Connect setup](./connect-setup.md#desktop-passkeys) for local signing and renderer HMR.
+
+## Music Up Next helper (macOS)
+
+Up Next reads Music's own queue through a separate helper app, so the Accessibility permission it
+needs belongs to the helper and never to T3 Code or the agents it runs. The server launches it
+through LaunchServices from `~/Applications/T3 Music Up Next.app`; without it, Up Next says the
+helper is missing. Build and install it with
+`apps/server/native/music-up-next/build.sh <folder>` and
+`apps/server/native/music-up-next/install.sh "<folder>/T3 Music Up Next.app"`; run
+`apps/server/native/music-up-next/test.sh` after changing the reader. Each new build has a new
+code identity, so macOS asks for Accessibility again.

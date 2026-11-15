@@ -94,9 +94,10 @@ const makeHarness = Effect.fn("makeHarness")(function* (options?: {
 const providePlayer = (
   runner: ProcessRunner.ProcessRunner["Service"],
   platform: NodeJS.Platform = "darwin",
+  upNextHelper = "/nonexistent/T3 Music Up Next.app",
 ) =>
   Effect.provide(
-    MusicPlayer.layer.pipe(
+    MusicPlayer.layerWith({ upNextHelper }).pipe(
       Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
       Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
       Layer.provide(MusicListeningStats.layerMemory),
@@ -1097,27 +1098,35 @@ describe("MusicPlayer", () => {
     }),
   );
 
-  it.effect("reads Music's own Up Next panel as sections after its header", () =>
+  it.effect("reads Music's own Up Next through the helper, after the header that opens it", () =>
     Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const helper = `${yield* fileSystem.makeTempDirectoryScoped()}/T3 Music Up Next.app`;
+      yield* fileSystem.makeDirectory(helper);
       const song = (label: string) => ({
         texts: [label],
         buttons: [{ id: "actionButton", label: "More" }],
       });
-      const header = (title: string, source: string | null) => ({
+      const header = (title: string, buttons: ReadonlyArray<{ id: string; label?: string }>) => ({
         texts: [title],
-        buttons: [
-          ...(source === null ? [] : [{ id: "from", label: source }]),
-          { id: "action", label: "Clear" },
-        ],
+        buttons,
       });
-      const panel = (rows: ReadonlyArray<unknown>, lastVisibleIndex: number, rowCount: number) =>
-        output({ stdout: JSON.stringify({ kind: "panel", rows, lastVisibleIndex, rowCount }) });
-      const replies = [
-        // History first, then Music's queue; a song queued twice stays twice.
+      const opener = header("Continue Playing", [
+        { id: "from", label: "From musics!" },
+        { id: "action", label: "Clear" },
+      ]);
+      const panel = (rows: ReadonlyArray<unknown>, lastVisibleIndex: number, rowCount: number) => ({
+        kind: "panel",
+        rows,
+        lastVisibleIndex,
+        rowCount,
+      });
+      // Each launch answers with the next read, the way the helper writes its file.
+      const reads: Array<unknown> = [
         panel(
           [
             song("Distinto Beny Jr — 3O"),
-            header("Continue Playing", "From musics!"),
+            opener,
             song("Vacile Yan Block — Vacile - Single"),
             song("Fuma Bad Gyal — Fuma - Single"),
             song("Fuma Bad Gyal — Fuma - Single"),
@@ -1125,52 +1134,64 @@ describe("MusicPlayer", () => {
           23,
           302,
         ),
-        // Headers are found by Music's buttons, so any language works; the list ends on screen.
+        // Headers Music draws later (any language, any buttons) start sections; the list ends on screen.
         panel(
           [
-            header("Als Nächstes", null),
+            header("Als Nächstes", [{ id: "action" }]),
             song("A"),
-            header("Weiter abspielen", "Von Mix"),
+            header("Autoplay", []),
             song("B"),
           ],
           3,
           4,
         ),
-        panel([song("Old one"), song("Old two")], 10, 302),
+        panel([song("Old"), opener], 10, 302),
+        panel([song("Old one"), header("History", []), song("Old two")], 10, 302),
         panel(
-          [
-            header("Continue Playing", "From musics!"),
-            song("Drawn"),
-            { texts: [], buttons: [] },
-            song("Later"),
-          ],
+          [opener, song("Drawn"), { texts: [], buttons: [{ id: "actionButton" }] }, song("Later")],
           3,
           4,
         ),
-        output({ stdout: JSON.stringify({ kind: "closed" }) }),
-        output({ stdout: JSON.stringify({ kind: "unrecognised" }) }),
-        output({
-          code: ChildProcessSpawner.ExitCode(1),
-          stderr: "execution error: Not authorized to send Apple events to System Events. (-1743)",
-        }),
-        output({
-          code: ChildProcessSpawner.ExitCode(1),
-          stderr: "execution error: osascript is not allowed assistive access. (-1719)",
-        }),
-        output({
-          code: ChildProcessSpawner.ExitCode(1),
-          stderr: "execution error: something else (-1728)",
-        }),
+        { kind: "closed" },
+        { kind: "unrecognised" },
+        { kind: "unreadable" },
+        { kind: "permission-needed" },
+        { kind: "not-running" },
+        "wrong request",
+        "oversize",
+        "no answer",
       ];
-      const { calls, runner } = yield* makeHarness({
-        respond: () => Effect.succeed(replies.shift()!),
+      const launches: Array<ReadonlyArray<string>> = [];
+      const { runner } = yield* makeHarness({
+        respond: (args) =>
+          Effect.gen(function* () {
+            launches.push(args);
+            const env = (name: string) =>
+              args.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1) ?? "";
+            const read = reads.shift();
+            const out = env("T3_MUSIC_UP_NEXT_OUT");
+            if (read === "no answer") return output();
+            const files = yield* FileSystem.FileSystem;
+            const request =
+              read === "wrong request" ? "someone else" : env("T3_MUSIC_UP_NEXT_REQUEST");
+            const body =
+              read === "oversize"
+                ? "x".repeat(600 * 1024)
+                : JSON.stringify({
+                    request,
+                    read: read === "wrong request" ? { kind: "closed" } : read,
+                  });
+            yield* files.writeFileString(out, body);
+            return output();
+          }).pipe(Effect.provide(NodeServices.layer), Effect.orDie),
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
-        const read = Effect.gen(function* () {
-          yield* TestClock.adjust("3 seconds");
-          return yield* player.nativeQueue;
-        });
+        let song_ = 0;
+        // A new song each time, so each read reaches the helper.
+        const read = Effect.suspend(() =>
+          player.nativeQueue({ trackId: `AAAAAAAAAAAA${String(song_++).padStart(4, "0")}` }),
+        );
         assert.deepStrictEqual(yield* read, {
           _tag: "ok",
           sections: [
@@ -1186,32 +1207,69 @@ describe("MusicPlayer", () => {
           ],
           complete: false,
         });
+        // Launched through LaunchServices with its own request and output file.
+        const first = launches[0]!;
+        assert.deepStrictEqual(first.slice(0, 5), ["open", "-g", "-n", "-W", "--env"]);
+        assert.strictEqual(first.at(-1), helper);
+        assert.isTrue(first.includes("T3_MUSIC_UP_NEXT_PROMPT=1"));
         assert.deepStrictEqual(yield* read, {
           _tag: "ok",
           sections: [
             { title: "Als Nächstes", source: null, songs: ["A"] },
-            { title: "Weiter abspielen", source: "Von Mix", songs: ["B"] },
+            { title: "Autoplay", source: null, songs: ["B"] },
           ],
           complete: true,
         });
+        // The opening header is the last row on screen: nothing readable yet, and not "nothing next".
+        assert.deepStrictEqual(yield* read, {
+          _tag: "ok",
+          sections: [{ title: "Continue Playing", source: "From musics!", songs: [] }],
+          complete: false,
+        });
+        // A header without Music's Clear or From button never turns history into Up Next.
         assert.deepStrictEqual(yield* read, { _tag: "no-upcoming-visible" });
         assert.deepStrictEqual(yield* read, {
           _tag: "ok",
           sections: [{ title: "Continue Playing", source: "From musics!", songs: ["Drawn"] }],
           complete: false,
         });
-        assert.deepStrictEqual(yield* read, { _tag: "panel-closed" });
-        assert.deepStrictEqual(yield* read, { _tag: "unrecognised" });
-        assert.deepStrictEqual(yield* read, { _tag: "permission-needed", grant: "automation" });
-        assert.deepStrictEqual(yield* read, { _tag: "permission-needed", grant: "accessibility" });
-        const failed = yield* Effect.flip(read);
-        assert.deepStrictEqual([failed.operation, failed.reason], ["native-queue", "unavailable"]);
-        // Clients asking at about the same time share one read of Music's panel.
-        const before = (yield* Ref.get(calls)).length;
-        replies.push(output({ stdout: JSON.stringify({ kind: "closed" }) }));
-        yield* read;
-        yield* player.nativeQueue;
-        assert.strictEqual((yield* Ref.get(calls)).length, before + 1);
+        for (const tag of [
+          "panel-closed",
+          "unrecognised",
+          "unreadable",
+          "permission-needed",
+          "not-running",
+        ] as const) {
+          assert.deepStrictEqual(yield* read, { _tag: tag });
+        }
+        for (let i = 0; i < 3; i++) {
+          const failed = yield* Effect.flip(read);
+          assert.deepStrictEqual(
+            [failed.operation, failed.reason],
+            ["native-queue", "unavailable"],
+          );
+        }
+        // The same song within two seconds shares one launch; another song launches again.
+        const before = launches.length;
+        reads.push({ kind: "closed" }, { kind: "closed" });
+        yield* player.nativeQueue({ trackId: "BBBBBBBBBBBBBBBB" });
+        yield* player.nativeQueue({ trackId: "BBBBBBBBBBBBBBBB" });
+        assert.strictEqual(launches.length, before + 1);
+        yield* player.nativeQueue({ trackId: "CCCCCCCCCCCCCCCC" });
+        assert.strictEqual(launches.length, before + 2);
+      }).pipe(providePlayer(runner, "darwin", helper), Effect.scoped);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("says when the Up Next helper is not installed", () =>
+    Effect.gen(function* () {
+      const { calls, runner } = yield* makeHarness();
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        assert.deepStrictEqual(yield* player.nativeQueue({ trackId: null }), {
+          _tag: "helper-missing",
+        });
+        assert.strictEqual((yield* Ref.get(calls)).length, 0);
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );

@@ -225,7 +225,7 @@ export const MusicNativeQueueSection = Schema.Struct({
 });
 export type MusicNativeQueueSection = typeof MusicNativeQueueSection.Type;
 
-/** What Music's Up Next panel shows, read through Accessibility. */
+/** What Music's Up Next panel shows, read by the T3 Music Up Next helper through Accessibility. */
 export const MusicNativeQueue = Schema.Union([
   Schema.TaggedStruct("ok", {
     sections: Schema.Array(MusicNativeQueueSection),
@@ -235,11 +235,14 @@ export const MusicNativeQueue = Schema.Union([
   Schema.TaggedStruct("panel-closed", {}),
   /** Music's window has neither the panel nor its button T3 knows. */
   Schema.TaggedStruct("unrecognised", {}),
-  /** The panel shows only history; no upcoming header is on screen. */
+  /** The panel was found but its rows could not be read. */
+  Schema.TaggedStruct("unreadable", {}),
+  /** The header that opens Music's queue is not on screen. */
   Schema.TaggedStruct("no-upcoming-visible", {}),
-  Schema.TaggedStruct("permission-needed", {
-    grant: Schema.Literals(["accessibility", "automation"]),
-  }),
+  /** T3 Music Up Next is not allowed Accessibility yet. */
+  Schema.TaggedStruct("permission-needed", {}),
+  /** The T3 Music Up Next helper is not installed on this Mac. */
+  Schema.TaggedStruct("helper-missing", {}),
   Schema.TaggedStruct("not-running", {}),
 ]);
 export type MusicNativeQueue = typeof MusicNativeQueue.Type;
