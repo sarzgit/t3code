@@ -84,6 +84,14 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // Rewrites the host's listening history.
   [WS_METHODS.musicImportHistory]: AuthOrchestrationOperateScope,
   [WS_METHODS.musicClearHistory]: AuthOrchestrationOperateScope,
+  // Changes what the host plays next or what it remembers playing.
+  [WS_METHODS.musicEditQueue]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicUndoReplace]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicPlayList]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicResumeQueue]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicDismissSavedQueue]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicSetTrackFavorited]: AuthOrchestrationOperateScope,
+  [WS_METHODS.musicClearRecent]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

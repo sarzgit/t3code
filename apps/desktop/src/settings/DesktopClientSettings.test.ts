@@ -73,6 +73,7 @@ const clientSettings: ClientSettings = {
   timestampFormat: "24-hour",
   wordWrap: true,
   musicPlayerEnabled: true,
+  musicGlobalShortcuts: { enabled: false, bindings: {} },
 };
 
 const decodeClientSettingsJson = Schema.decodeEffect(Schema.fromJsonString(ClientSettingsSchema));

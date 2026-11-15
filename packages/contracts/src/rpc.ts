@@ -432,6 +432,19 @@ import {
   MusicStatsInput,
   MusicUpNext,
   MusicUpNextInput,
+  MusicEditQueueInput,
+  MusicFavorites,
+  MusicGetQueueInput,
+  MusicListFavoritesInput,
+  MusicListRecentInput,
+  MusicPlayListInput,
+  MusicQueueRef,
+  MusicQueueStatus,
+  MusicQueueView,
+  MusicRecent,
+  MusicSavedQueueInput,
+  MusicSetTrackFavoritedInput,
+  MusicUndoReplaceInput,
 } from "./music.ts";
 
 export const WS_METHODS = {
@@ -655,6 +668,17 @@ export const WS_METHODS = {
   musicGetStats: "music.getStats",
   musicImportHistory: "music.importHistory",
   musicClearHistory: "music.clearHistory",
+  subscribeMusicQueue: "subscribeMusicQueue",
+  musicGetQueue: "music.getQueue",
+  musicEditQueue: "music.editQueue",
+  musicUndoReplace: "music.undoReplace",
+  musicPlayList: "music.playList",
+  musicResumeQueue: "music.resumeQueue",
+  musicDismissSavedQueue: "music.dismissSavedQueue",
+  musicListFavorites: "music.listFavorites",
+  musicSetTrackFavorited: "music.setTrackFavorited",
+  musicListRecent: "music.listRecent",
+  musicClearRecent: "music.clearRecent",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
@@ -1889,6 +1913,68 @@ const WsMusicClearHistoryRpc = Rpc.make(WS_METHODS.musicClearHistory, {
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
 });
 
+const WsSubscribeMusicQueueRpc = Rpc.make(WS_METHODS.subscribeMusicQueue, {
+  payload: Schema.Struct({}),
+  success: MusicQueueStatus,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsMusicGetQueueRpc = Rpc.make(WS_METHODS.musicGetQueue, {
+  payload: MusicGetQueueInput,
+  success: MusicQueueView,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicEditQueueRpc = Rpc.make(WS_METHODS.musicEditQueue, {
+  payload: MusicEditQueueInput,
+  success: MusicQueueRef,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicUndoReplaceRpc = Rpc.make(WS_METHODS.musicUndoReplace, {
+  payload: MusicUndoReplaceInput,
+  success: MusicQueueRef,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicPlayListRpc = Rpc.make(WS_METHODS.musicPlayList, {
+  payload: MusicPlayListInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicResumeQueueRpc = Rpc.make(WS_METHODS.musicResumeQueue, {
+  payload: MusicSavedQueueInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicDismissSavedQueueRpc = Rpc.make(WS_METHODS.musicDismissSavedQueue, {
+  payload: MusicSavedQueueInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicListFavoritesRpc = Rpc.make(WS_METHODS.musicListFavorites, {
+  payload: MusicListFavoritesInput,
+  success: MusicFavorites,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicSetTrackFavoritedRpc = Rpc.make(WS_METHODS.musicSetTrackFavorited, {
+  payload: MusicSetTrackFavoritedInput,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicListRecentRpc = Rpc.make(WS_METHODS.musicListRecent, {
+  payload: MusicListRecentInput,
+  success: MusicRecent,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
+const WsMusicClearRecentRpc = Rpc.make(WS_METHODS.musicClearRecent, {
+  payload: Schema.Struct({}),
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
   payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
   success: OrchestrationV2RpcSchemas.dispatchCommand.output,
@@ -2396,6 +2482,17 @@ export const WsRpcGroup = RpcGroup.make(
   WsMusicGetStatsRpc,
   WsMusicImportHistoryRpc,
   WsMusicClearHistoryRpc,
+  WsSubscribeMusicQueueRpc,
+  WsMusicGetQueueRpc,
+  WsMusicEditQueueRpc,
+  WsMusicUndoReplaceRpc,
+  WsMusicPlayListRpc,
+  WsMusicResumeQueueRpc,
+  WsMusicDismissSavedQueueRpc,
+  WsMusicListFavoritesRpc,
+  WsMusicSetTrackFavoritedRpc,
+  WsMusicListRecentRpc,
+  WsMusicClearRecentRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

@@ -22,6 +22,19 @@ import {
   type MusicStatsInput,
   type MusicUpNext,
   type MusicUpNextInput,
+  type MusicEditQueueInput,
+  type MusicFavorites,
+  type MusicGetQueueInput,
+  type MusicListFavoritesInput,
+  type MusicListRecentInput,
+  type MusicPlayListInput,
+  type MusicQueueRef,
+  type MusicQueueStatus,
+  type MusicQueueView,
+  type MusicRecent,
+  type MusicSavedQueueInput,
+  type MusicSetTrackFavoritedInput,
+  type MusicUndoReplaceInput,
   MUSIC_LIBRARY_SEARCH_LIMIT,
 } from "@t3tools/contracts";
 import * as NodeOS from "node:os";
@@ -76,6 +89,24 @@ export class MusicPlayer extends Context.Service<
     readonly clearHistory: Effect.Effect<void, MusicError>;
     /** Agent requests drive the cue; working projects attribute listening time. */
     readonly observeAgents: (activity: AgentActivity, cue: MusicAgentCue) => Effect.Effect<void>;
+    /** The T3 queue's identity, the saved queue and list revisions; works with Music closed. */
+    readonly queueStream: Stream.Stream<MusicQueueStatus>;
+    readonly getQueue: (input: MusicGetQueueInput) => Effect.Effect<MusicQueueView, MusicError>;
+    readonly editQueue: (input: MusicEditQueueInput) => Effect.Effect<MusicQueueRef, MusicError>;
+    readonly undoReplace: (
+      input: MusicUndoReplaceInput,
+    ) => Effect.Effect<MusicQueueRef, MusicError>;
+    readonly playList: (input: MusicPlayListInput) => Effect.Effect<void, MusicError>;
+    readonly resumeQueue: (input: MusicSavedQueueInput) => Effect.Effect<void, MusicError>;
+    readonly dismissSavedQueue: (input: MusicSavedQueueInput) => Effect.Effect<void, MusicError>;
+    readonly listFavorites: (
+      input: MusicListFavoritesInput,
+    ) => Effect.Effect<MusicFavorites, MusicError>;
+    readonly setTrackFavorited: (
+      input: MusicSetTrackFavoritedInput,
+    ) => Effect.Effect<void, MusicError>;
+    readonly listRecent: (input: MusicListRecentInput) => Effect.Effect<MusicRecent, MusicError>;
+    readonly clearRecent: Effect.Effect<void, MusicError>;
   }
 >()("t3/music/MusicPlayer") {}
 
@@ -965,6 +996,11 @@ function makeLineSplitter(onLine: (line: string) => void) {
   };
 }
 
+const notYet = (operation: MusicError["operation"]) =>
+  Effect.fn("MusicPlayer.notYet")(function* (_input: unknown) {
+    return yield* new MusicError({ operation, reason: "unavailable" });
+  });
+
 const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNextHelper: string }) {
   const platform = yield* HostProcess.Platform;
   const runner = yield* ProcessRunner.ProcessRunner;
@@ -1623,6 +1659,18 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       ? listening.clearHistory
       : Effect.fail(new MusicError({ operation: "import-history", reason: "unsupported" })),
     observeAgents,
+    // Stage 0 freeze: the queue, favourites and recent services land in later stages.
+    queueStream: Stream.never,
+    getQueue: notYet("queue"),
+    editQueue: notYet("queue"),
+    undoReplace: notYet("queue"),
+    playList: notYet("queue"),
+    resumeQueue: notYet("queue"),
+    dismissSavedQueue: notYet("queue"),
+    listFavorites: notYet("favorites"),
+    setTrackFavorited: notYet("favorites"),
+    listRecent: notYet("recent"),
+    clearRecent: Effect.fail(new MusicError({ operation: "recent", reason: "unavailable" })),
   });
 });
 

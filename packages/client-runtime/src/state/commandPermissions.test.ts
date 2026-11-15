@@ -212,6 +212,13 @@ describe("command permissions", () => {
     WS_METHODS.musicControl,
     WS_METHODS.musicImportHistory,
     WS_METHODS.musicClearHistory,
+    WS_METHODS.musicEditQueue,
+    WS_METHODS.musicUndoReplace,
+    WS_METHODS.musicPlayList,
+    WS_METHODS.musicResumeQueue,
+    WS_METHODS.musicDismissSavedQueue,
+    WS_METHODS.musicSetTrackFavorited,
+    WS_METHODS.musicClearRecent,
   ])("uses the target grant for both availability and execution of %s", (method) =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -322,6 +322,226 @@ export const MusicImportHistoryResult = Schema.Struct({
 });
 export type MusicImportHistoryResult = typeof MusicImportHistoryResult.Type;
 
+/** A T3-managed queue, formula or explicit; a new T3 play makes a new one. */
+export const MusicQueueId = Schema.String.check(Schema.isPattern(/^q[0-9a-z]{6,40}$/));
+export type MusicQueueId = typeof MusicQueueId.Type;
+
+/** Bumps on every order change (materialise, edit, shuffle, Reset, replacement), never on a step. */
+export const MusicQueueRevision = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+export type MusicQueueRevision = typeof MusicQueueRevision.Type;
+
+/** `s<n>`: index n in the source's song list. `a<n>`: the n-th song added. Stable once given. */
+export const MusicQueueEntryKey = Schema.String.check(Schema.isPattern(/^[sa](0|[1-9]\d{0,6})$/));
+export type MusicQueueEntryKey = typeof MusicQueueEntryKey.Type;
+
+/** Names a queue entry and the song it must still hold, so an edit never lands on another song. */
+export const MusicQueueTarget = Schema.Struct({
+  key: MusicQueueEntryKey,
+  trackId: MusicPersistentId,
+});
+export type MusicQueueTarget = typeof MusicQueueTarget.Type;
+
+/** A song from a row: its playlist (the library for library rows) and position, checked by id. */
+export const MusicSongRef = Schema.Struct({
+  playlistId: MusicPersistentId,
+  trackId: MusicPersistentId,
+  index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type MusicSongRef = typeof MusicSongRef.Type;
+
+const MUSIC_QUEUE_PAGE = 50;
+
+export const MusicQueueActive = Schema.Struct({
+  id: MusicQueueId,
+  revision: MusicQueueRevision,
+  /** False for an unedited playlist queue, which T3 still steps by formula. */
+  edited: Schema.Boolean,
+  currentKey: MusicQueueEntryKey,
+});
+export type MusicQueueActive = typeof MusicQueueActive.Type;
+
+/** The queue a Resume card offers. Labels are display hints saved with the entry. */
+export const MusicSavedQueue = Schema.Struct({
+  id: MusicQueueId,
+  revision: MusicQueueRevision,
+  trackName: MusicText,
+  artist: Schema.NullOr(MusicText),
+  sourceName: MusicText,
+  positionSec: Schema.Number,
+  /** Only a live query or Resume sets this; Music being closed never does. */
+  sourceMissing: Schema.Boolean,
+});
+export type MusicSavedQueue = typeof MusicSavedQueue.Type;
+
+/** An edited queue a new play replaced; `music.undoReplace` with this tuple restores it. */
+export const MusicReplacedQueue = Schema.Struct({
+  replacedId: MusicQueueId,
+  replacedRevision: MusicQueueRevision,
+  byId: MusicQueueId,
+  byRevision: MusicQueueRevision,
+  /** Server epoch ms. */
+  expiresAt: Schema.Number,
+});
+export type MusicReplacedQueue = typeof MusicReplacedQueue.Type;
+
+export const MusicQueueStatus = Schema.Struct({
+  active: Schema.NullOr(MusicQueueActive),
+  saved: Schema.NullOr(MusicSavedQueue),
+  replaced: Schema.NullOr(MusicReplacedQueue),
+  favouritesRevision: Schema.Int,
+  recentRevision: Schema.Int,
+});
+export type MusicQueueStatus = typeof MusicQueueStatus.Type;
+
+export const MusicQueueEntry = Schema.Struct({
+  key: MusicQueueEntryKey,
+  trackId: MusicPersistentId,
+  name: MusicText,
+  artist: MusicText,
+  durationSec: Schema.Number,
+  /** The song could not be found; it shows disabled and the step skips it. */
+  unavailable: Schema.Boolean,
+});
+export type MusicQueueEntry = typeof MusicQueueEntry.Type;
+
+export const MusicGetQueueInput = Schema.Struct({ queueId: MusicQueueId });
+export type MusicGetQueueInput = typeof MusicGetQueueInput.Type;
+
+export const MusicQueueView = Schema.Struct({
+  id: MusicQueueId,
+  revision: MusicQueueRevision,
+  currentKey: MusicQueueEntryKey,
+  edited: Schema.Boolean,
+  sourceName: MusicText,
+  /** Songs in the playlist when this formula queue was read; the first edit sends it back. */
+  sourceCount: Schema.optionalKey(Schema.Int),
+  current: Schema.NullOr(MusicQueueEntry),
+  /** In play order, at most MUSIC_QUEUE_PAGE. */
+  upcoming: Schema.Array(MusicQueueEntry),
+  totalUpcoming: Schema.Int,
+  /** Repeat all: the list continues from the top. */
+  wraps: Schema.Boolean,
+  shuffled: Schema.Boolean,
+});
+export type MusicQueueView = typeof MusicQueueView.Type;
+
+const MusicQueueSongs = Schema.Array(MusicSongRef).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(100),
+);
+
+export const MusicQueueEdit = Schema.Union([
+  Schema.TaggedStruct("play-next", { songs: MusicQueueSongs }),
+  Schema.TaggedStruct("add", { songs: MusicQueueSongs }),
+  /** `toIndex` is the place among upcoming entries once the target is lifted out; 0 is next. */
+  Schema.TaggedStruct("move", {
+    target: MusicQueueTarget,
+    toIndex: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  }),
+  Schema.TaggedStruct("remove", {
+    targets: Schema.Array(MusicQueueTarget).check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(MUSIC_QUEUE_PAGE),
+    ),
+  }),
+  /** Puts the last removed entry back where it was, with the revision its removal produced. */
+  Schema.TaggedStruct("undo-remove", { target: MusicQueueTarget }),
+  Schema.TaggedStruct("clear-upcoming", {}),
+  /** Playlist order: drops added songs but the current one and turns shuffle off. */
+  Schema.TaggedStruct("reset", {}),
+]);
+export type MusicQueueEdit = typeof MusicQueueEdit.Type;
+
+export const MusicEditQueueInput = Schema.Struct({
+  queueId: MusicQueueId,
+  expectedRevision: MusicQueueRevision,
+  /** The first edit of an unedited playlist queue: the song count its view read. */
+  sourceCount: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  edit: MusicQueueEdit,
+});
+export type MusicEditQueueInput = typeof MusicEditQueueInput.Type;
+
+export const MusicQueueRef = Schema.Struct({ id: MusicQueueId, revision: MusicQueueRevision });
+export type MusicQueueRef = typeof MusicQueueRef.Type;
+
+export const MusicUndoReplaceInput = Schema.Struct({
+  replacedId: MusicQueueId,
+  replacedRevision: MusicQueueRevision,
+  byId: MusicQueueId,
+  byRevision: MusicQueueRevision,
+});
+export type MusicUndoReplaceInput = typeof MusicUndoReplaceInput.Type;
+
+/** Names the saved queue, so a stale client never resumes or dismisses its replacement. */
+export const MusicSavedQueueInput = Schema.Struct({
+  queueId: MusicQueueId,
+  revision: MusicQueueRevision,
+});
+export type MusicSavedQueueInput = typeof MusicSavedQueueInput.Type;
+
+export const MusicListSource = Schema.Literals(["favourites", "recent"]);
+export type MusicListSource = typeof MusicListSource.Type;
+
+/** Plays from a row and continues through the rest of that list as a T3 queue. */
+export const MusicPlayListInput = Schema.Struct({
+  source: MusicListSource,
+  /** Null starts at the top (or a random song when shuffling). */
+  startTrackId: Schema.NullOr(MusicPersistentId),
+  shuffle: Schema.optionalKey(Schema.Boolean),
+});
+export type MusicPlayListInput = typeof MusicPlayListInput.Type;
+
+const MUSIC_LIST_PAGE_LIMIT = 100;
+
+const MusicPage = {
+  offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  limit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MUSIC_LIST_PAGE_LIMIT })),
+};
+
+export const MusicListFavoritesInput = Schema.Struct({
+  query: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
+  ...MusicPage,
+});
+export type MusicListFavoritesInput = typeof MusicListFavoritesInput.Type;
+
+export const MusicFavorites = Schema.Struct({
+  playlistId: MusicPersistentId,
+  songs: Schema.Array(MusicLibrarySong),
+  total: Schema.Int,
+  /** When the library read behind this page was taken; a change means start again. */
+  snapshotAt: Schema.Number,
+});
+export type MusicFavorites = typeof MusicFavorites.Type;
+
+export const MusicSetTrackFavoritedInput = Schema.Struct({
+  trackId: MusicPersistentId,
+  favorited: Schema.Boolean,
+});
+export type MusicSetTrackFavoritedInput = typeof MusicSetTrackFavoritedInput.Type;
+
+export const MusicListRecentInput = Schema.Struct(MusicPage);
+export type MusicListRecentInput = typeof MusicListRecentInput.Type;
+
+export const MusicRecentSong = Schema.Struct({
+  trackId: MusicPersistentId,
+  name: MusicText,
+  artist: MusicText,
+  album: MusicText,
+  durationSec: Schema.Number,
+  lastPlayedAt: Schema.Number,
+  /** Position among the library's songs; null when the song is no longer in the library. */
+  index: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type MusicRecentSong = typeof MusicRecentSong.Type;
+
+export const MusicRecent = Schema.Struct({
+  /** The library playlist the songs play from; null when the library could not be read. */
+  playlistId: Schema.NullOr(MusicPersistentId),
+  songs: Schema.Array(MusicRecentSong),
+  total: Schema.Int,
+});
+export type MusicRecent = typeof MusicRecent.Type;
+
 export const MusicAgentCue = Schema.Literals(["off", "lower-volume", "pause"]);
 export type MusicAgentCue = typeof MusicAgentCue.Type;
 
@@ -338,8 +558,19 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
     "artwork",
     "stats",
     "import-history",
+    "queue",
+    "favorites",
+    "recent",
   ]),
-  reason: Schema.Literals(["unsupported", "permission-denied", "not-found", "unavailable"]),
+  reason: Schema.Literals([
+    "unsupported",
+    "permission-denied",
+    "not-found",
+    "unavailable",
+    /** The queue changed since the client read it; it refetches. */
+    "queue-changed",
+    "queue-too-long",
+  ]),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -349,9 +580,15 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
       case "permission-denied":
         return "Allow T3 Code to control Music in System Settings › Privacy & Security › Automation.";
       case "not-found":
-        return this.operation === "play-track"
+        return this.operation === "play-track" || this.operation === "queue"
           ? "That song is no longer in this playlist."
-          : "That playlist is no longer in your Music library.";
+          : this.operation === "favorites" || this.operation === "recent"
+            ? "That song is no longer in your Music library."
+            : "That playlist is no longer in your Music library.";
+      case "queue-changed":
+        return "Up Next changed. Try again.";
+      case "queue-too-long":
+        return "This playlist is too long to edit in Up Next.";
       case "unavailable":
         return this.operation === "import-history"
           ? "Listening history could not be saved. Try again."

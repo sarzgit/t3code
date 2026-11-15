@@ -109,6 +109,71 @@ export function createMusicEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    // Queue identity, the saved queue and list revisions; never per sample, so cheap to hold.
+    queue: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:music:queue",
+      tag: WS_METHODS.subscribeMusicQueue,
+      idleTtlMs: 0,
+    }),
+    // Keyed by queue id; callers refresh when the revision, current entry or edited flag moves.
+    queueView: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:queue-view",
+      tag: WS_METHODS.musicGetQueue,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    favorites: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:favorites",
+      tag: WS_METHODS.musicListFavorites,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    recent: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:recent",
+      tag: WS_METHODS.musicListRecent,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    editQueue: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:edit-queue",
+      tag: WS_METHODS.musicEditQueue,
+      scheduler,
+      concurrency,
+    }),
+    undoReplace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:undo-replace",
+      tag: WS_METHODS.musicUndoReplace,
+      scheduler,
+      concurrency,
+    }),
+    playList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:play-list",
+      tag: WS_METHODS.musicPlayList,
+      scheduler,
+      concurrency,
+    }),
+    resumeQueue: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:resume-queue",
+      tag: WS_METHODS.musicResumeQueue,
+      scheduler,
+      concurrency,
+    }),
+    dismissSavedQueue: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:dismiss-saved-queue",
+      tag: WS_METHODS.musicDismissSavedQueue,
+      scheduler,
+      concurrency,
+    }),
+    setTrackFavorited: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:set-track-favorited",
+      tag: WS_METHODS.musicSetTrackFavorited,
+      scheduler,
+      concurrency,
+    }),
+    clearRecent: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:music:clear-recent",
+      tag: WS_METHODS.musicClearRecent,
+    }),
   };
 }
 

@@ -272,6 +272,29 @@ export function snapShotModifierPairLabel(modifier: SnapShotModifier, apple: boo
   const label = (apple ? APPLE_MODIFIER_LABELS : OTHER_MODIFIER_LABELS)[modifier];
   return `${label} + ${label}`;
 }
+const MUSIC_GLOBAL_SHORTCUT_ACTIONS = [
+  "playPause",
+  "next",
+  "previous",
+  "favorite",
+  "toggleMiniPlayer",
+] as const;
+export const MusicGlobalShortcutAction = Schema.Literals(MUSIC_GLOBAL_SHORTCUT_ACTIONS);
+export type MusicGlobalShortcutAction = typeof MusicGlobalShortcutAction.Type;
+
+/** Desktop-wide music keys. Off and unbound by default; validated before registering. */
+export const MusicGlobalShortcuts = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  bindings: Schema.Struct({
+    playPause: Schema.optionalKey(KeybindingShortcut),
+    next: Schema.optionalKey(KeybindingShortcut),
+    previous: Schema.optionalKey(KeybindingShortcut),
+    favorite: Schema.optionalKey(KeybindingShortcut),
+    toggleMiniPlayer: Schema.optionalKey(KeybindingShortcut),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+});
+export type MusicGlobalShortcuts = typeof MusicGlobalShortcuts.Type;
+
 const DEFAULT_SNAP_SHOT_SHORTCUT: SnapShotShortcut = {
   kind: "both-shift-keys",
 };
@@ -606,6 +629,9 @@ export const ClientSettingsSchema = Schema.Struct({
   mathRenderingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Shown only when the environment is macOS, where it drives the Music app.
   musicPlayerEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  musicGlobalShortcuts: MusicGlobalShortcuts.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ enabled: false, bindings: {} })),
+  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -2112,5 +2138,6 @@ export const ClientSettingsPatch = Schema.Struct({
   wordWrap: Schema.optionalKey(Schema.Boolean),
   mathRenderingEnabled: Schema.optionalKey(Schema.Boolean),
   musicPlayerEnabled: Schema.optionalKey(Schema.Boolean),
+  musicGlobalShortcuts: Schema.optionalKey(MusicGlobalShortcuts),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;
