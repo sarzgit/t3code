@@ -58,8 +58,11 @@ or use **Play** and **Shuffle** for the whole playlist. The search box above the
 songs anywhere in your library; a song started there carries on through your library, in track
 order or shuffled.
 **Up Next** lists what plays after a song you started from a playlist, a search, or **Shuffle**.
-With shuffle on, T3 Code shuffles the playlist itself, so the list is what will play. Music doesn't
-share its own queue, so it can't list what comes next for **Play** or Autoplay.
+With shuffle on, T3 Code shuffles the playlist itself, so the list is what will play. When Music
+plays its own queue (**Play**, Play or Shuffle pressed in Music, or Autoplay), Up Next shows what
+Music's own Up Next panel shows: keep that panel open in Music, and allow T3 Code under
+**System Settings → Privacy & Security → Accessibility**. Only the songs Music's panel has on
+screen are listed.
 The command palette also has
 **Music: Play/Pause**, **Next track**, and **Previous track**, bound by default to ⌘⌥/, ⌘⌥. and ⌘⌥,
 (Ctrl+Alt elsewhere); change them under **Settings → Keybindings**. The heart beside the song

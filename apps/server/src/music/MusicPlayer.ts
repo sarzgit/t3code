@@ -9,6 +9,7 @@ import {
   type MusicLibrarySearch,
   type MusicLibrarySong,
   type MusicListTracksInput,
+  type MusicNativeQueue,
   type MusicPlayerState,
   type MusicPlaylists,
   type MusicPlaylistTrack,
@@ -60,6 +61,8 @@ export class MusicPlayer extends Context.Service<
     ) => Effect.Effect<MusicLibrarySearch, MusicError>;
     /** The songs T3 Code will play after the one at `index`, as STEP_SCRIPT moves on. */
     readonly upNext: (input: MusicUpNextInput) => Effect.Effect<MusicUpNext, MusicError>;
+    /** What Music's own Up Next panel shows, while Music runs its own queue. */
+    readonly nativeQueue: Effect.Effect<MusicNativeQueue, MusicError>;
     readonly control: (input: MusicControlInput) => Effect.Effect<void, MusicError>;
     readonly artwork: (input: MusicArtworkInput) => Effect.Effect<MusicArtwork, MusicError>;
     readonly stats: (input: MusicStatsInput) => Effect.Effect<MusicStats, MusicError>;
@@ -387,6 +390,64 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   return "ok:" + target + ":" + list.ids[target] + ":" + (Music.shuffleEnabled() ? "on" : "off");
 }${SONGS_JXA}`;
 
+// Music's scripting has no queue, so this reads the rows its Up Next panel shows, through
+// Accessibility. It only reads, finds the panel by Music's own identifiers rather than text, and
+// returns labels only. Music builds the panel only while it is open.
+const NATIVE_QUEUE_SCRIPT = `function run() {
+  if (!Application("Music").running()) return JSON.stringify({ kind: "not-running" });
+  const found = Application("System Events").processes.whose({ bundleIdentifier: "com.apple.Music" })();
+  if (found.length === 0) return JSON.stringify({ kind: "not-running" });
+  const attr = (el, name) => { try { return el.attributes.byName(name).value(); } catch (error) { return null; } };
+  const tableIn = (el) => {
+    try {
+      for (const area of el.scrollAreas()) {
+        if (attr(area, "AXIdentifier") === "scroller" && area.tables().length > 0) return area.tables()[0];
+      }
+    } catch (error) {}
+    return null;
+  };
+  const leaves = { AXTable: 1, AXOutline: 1, AXList: 1, AXRow: 1, AXBrowser: 1, AXWebArea: 1, AXMenuBar: 1 };
+  const pending = found[0].windows();
+  let table = null;
+  let queueButton = false;
+  for (let seen = 0; pending.length > 0 && seen < 200 && table === null; seen++) {
+    const el = pending.shift();
+    const id = attr(el, "AXIdentifier");
+    if (id === "headerContainer") table = tableIn(el);
+    if (typeof id === "string" && /queueButton$/.test(id)) queueButton = true;
+    if (table !== null) break;
+    let role = null;
+    try { role = el.role(); } catch (error) {}
+    if (leaves[role]) continue;
+    try { for (const child of el.uiElements()) pending.push(child); } catch (error) {}
+  }
+  if (table === null) return JSON.stringify({ kind: queueButton ? "closed" : "unrecognised" });
+  const visible = attr(table, "AXVisibleRows");
+  if (!Array.isArray(visible)) return JSON.stringify({ kind: "unrecognised" });
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 500) : null);
+  const rows = visible.slice(0, 80).map((row) => {
+    const texts = [];
+    const buttons = [];
+    let cells = [];
+    try { cells = row.uiElements(); } catch (error) {}
+    for (const cell of cells) {
+      try { for (const text of cell.staticTexts()) { const value = clip(text.value()); if (value !== null) texts.push(value); } } catch (error) {}
+      try {
+        for (const button of cell.buttons()) {
+          let label = null;
+          try { label = clip(button.name()) || clip(button.description()); } catch (error) {}
+          buttons.push({ id: clip(attr(button, "AXIdentifier")), label: label });
+        }
+      } catch (error) {}
+    }
+    return { texts: texts, buttons: buttons };
+  });
+  const last = visible.length > 0 ? attr(visible[visible.length - 1], "AXIndex") : null;
+  let rowCount = null;
+  try { rowCount = table.rows.length; } catch (error) {}
+  return JSON.stringify({ kind: "panel", rows: rows, lastVisibleIndex: last, rowCount: rowCount });
+}`;
+
 const CONTROL_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   switch (argv[0]) {
@@ -561,6 +622,26 @@ const RawUpNext = Schema.Struct({
 const decodeRawUpNext = Schema.decodeUnknownOption(Schema.fromJsonString(RawUpNext));
 const UP_NEXT_LIMIT = 25;
 
+const RawNativeQueue = Schema.Struct({
+  kind: Schema.String,
+  rows: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        texts: Schema.Array(Schema.String),
+        buttons: Schema.Array(
+          Schema.Struct({ id: Schema.NullOr(Schema.String), label: Schema.NullOr(Schema.String) }),
+        ),
+      }),
+    ),
+  ),
+  lastVisibleIndex: Schema.optional(Schema.NullOr(Schema.Number)),
+  rowCount: Schema.optional(Schema.NullOr(Schema.Number)),
+});
+const decodeRawNativeQueue = Schema.decodeUnknownOption(Schema.fromJsonString(RawNativeQueue));
+/** One read of Music's panel serves every client asking at about the same time. */
+const NATIVE_QUEUE_SHARE = Duration.seconds(2);
+const NATIVE_QUEUE_TIMEOUT = Duration.seconds(8);
+
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
 const seconds = (value: number | null | undefined) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
@@ -582,6 +663,65 @@ const playlistTracks = (tracks: typeof RawTracks.Type.tracks): Array<MusicPlayli
           },
         ];
   });
+
+type RawNativeRow = NonNullable<typeof RawNativeQueue.Type.rows>[number];
+
+/** Music marks a section header with its Clear (`action`) or source (`from`) button. */
+const isQueueHeader = (row: RawNativeRow) =>
+  row.buttons.some((button) => button.id === "action" || button.id === "from");
+
+/** Music's panel rows as Up Next sections; rows before the first header are history. */
+function parseNativeQueue(stdout: string): MusicNativeQueue | null {
+  const raw = Option.getOrNull(decodeRawNativeQueue(stdout));
+  if (raw === null) return null;
+  switch (raw.kind) {
+    case "not-running":
+      return { _tag: "not-running" };
+    case "closed":
+      return { _tag: "panel-closed" };
+    case "unrecognised":
+      return { _tag: "unrecognised" };
+    case "panel":
+      break;
+    default:
+      return null;
+  }
+  const rows = raw.rows ?? [];
+  const start = rows.findIndex(isQueueHeader);
+  if (start < 0) return { _tag: "no-upcoming-visible" };
+  const sections: Array<{ title: string; source: string | null; songs: Array<string> }> = [];
+  let complete =
+    typeof raw.rowCount === "number" &&
+    typeof raw.lastVisibleIndex === "number" &&
+    raw.lastVisibleIndex >= raw.rowCount - 1;
+  for (const row of rows.slice(start)) {
+    if (isQueueHeader(row)) {
+      const source = row.buttons.find((button) => button.id === "from")?.label ?? null;
+      sections.push({
+        title: text(row.texts[0]),
+        source: source === null ? null : text(source),
+        songs: [],
+      });
+      continue;
+    }
+    const label = row.texts.find((value) => value.trim() !== "");
+    // A row Music has not drawn yet ends what can be read.
+    if (label === undefined) {
+      complete = false;
+      break;
+    }
+    sections.at(-1)!.songs.push(text(label));
+  }
+  return { _tag: "ok", sections, complete };
+}
+
+/** Which macOS grant a failed read lacks, from osascript's error. */
+const nativeQueueDenial = (stderr: string): "accessibility" | "automation" | null =>
+  /-1743\b/.test(stderr)
+    ? "automation"
+    : /-1719\b|-25211\b|assistive access/i.test(stderr)
+      ? "accessibility"
+      : null;
 
 /** Lowercase, without accents, with runs of whitespace collapsed. */
 const fold = (value: string) =>
@@ -1280,6 +1420,38 @@ const make = Effect.gen(function* () {
     } satisfies MusicUpNext;
   });
 
+  const readNativeQueue = Effect.fn("MusicPlayer.readNativeQueue")(function* () {
+    if (!supported)
+      return yield* new MusicError({ operation: "native-queue", reason: "unsupported" });
+    const output = yield* runner
+      .run({
+        command: "osascript",
+        args: ["-l", "JavaScript", "-e", JXA_NO_DOCK_ICON + NATIVE_QUEUE_SCRIPT],
+        timeout: NATIVE_QUEUE_TIMEOUT,
+        maxOutputBytes: 256 * 1024,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new MusicError({ operation: "native-queue", reason: "unavailable", cause }),
+        ),
+      );
+    if (output.code !== 0) {
+      const grant = nativeQueueDenial(output.stderr);
+      if (grant !== null) return { _tag: "permission-needed", grant } satisfies MusicNativeQueue;
+      return yield* new MusicError({ operation: "native-queue", reason: "unavailable" });
+    }
+    const queue = parseNativeQueue(output.stdout.trim());
+    if (queue === null) {
+      return yield* new MusicError({ operation: "native-queue", reason: "unavailable" });
+    }
+    return queue;
+  });
+
+  const nativeQueueCache = yield* Cache.makeWith((_: "queue") => readNativeQueue(), {
+    capacity: 1,
+    timeToLive: () => NATIVE_QUEUE_SHARE,
+  });
+
   const controlArgs = (input: MusicControlInput): ReadonlyArray<string> => {
     switch (input._tag) {
       case "set-shuffle":
@@ -1448,6 +1620,7 @@ const make = Effect.gen(function* () {
     playTrack,
     searchLibrary,
     upNext,
+    nativeQueue: Cache.get(nativeQueueCache, "queue"),
     control,
     artwork,
     stats: Effect.fn("MusicPlayer.stats")(function* (input: MusicStatsInput) {

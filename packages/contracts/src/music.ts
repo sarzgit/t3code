@@ -210,6 +210,40 @@ export const MusicUpNext = Schema.Struct({
 });
 export type MusicUpNext = typeof MusicUpNext.Type;
 
+/** Asks again when the song changes. */
+export const MusicNativeQueueInput = Schema.Struct({ trackId: Schema.NullOr(MusicPersistentId) });
+export type MusicNativeQueueInput = typeof MusicNativeQueueInput.Type;
+
+/** A section of Music's own Up Next, as its panel draws it. */
+export const MusicNativeQueueSection = Schema.Struct({
+  /** Music's header, e.g. "Continue Playing" or "Playing Next". */
+  title: MusicText,
+  /** Music's source button, e.g. "From musics!". */
+  source: Schema.NullOr(MusicText),
+  /** Music's combined label for each song ("Title Artist — Album"), in its order. */
+  songs: Schema.Array(MusicText),
+});
+export type MusicNativeQueueSection = typeof MusicNativeQueueSection.Type;
+
+/** What Music's Up Next panel shows, read through Accessibility. */
+export const MusicNativeQueue = Schema.Union([
+  Schema.TaggedStruct("ok", {
+    sections: Schema.Array(MusicNativeQueueSection),
+    /** False when Music's list goes on past the rows it shows. */
+    complete: Schema.Boolean,
+  }),
+  Schema.TaggedStruct("panel-closed", {}),
+  /** Music's window has neither the panel nor its button T3 knows. */
+  Schema.TaggedStruct("unrecognised", {}),
+  /** The panel shows only history; no upcoming header is on screen. */
+  Schema.TaggedStruct("no-upcoming-visible", {}),
+  Schema.TaggedStruct("permission-needed", {
+    grant: Schema.Literals(["accessibility", "automation"]),
+  }),
+  Schema.TaggedStruct("not-running", {}),
+]);
+export type MusicNativeQueue = typeof MusicNativeQueue.Type;
+
 export const MusicControlInput = Schema.Union([
   Schema.TaggedStruct("play-pause", {}),
   Schema.TaggedStruct("next", {}),
@@ -296,6 +330,7 @@ export class MusicError extends Schema.TaggedError<MusicError>()("MusicError", {
     "play-track",
     "search-library",
     "up-next",
+    "native-queue",
     "control",
     "artwork",
     "stats",

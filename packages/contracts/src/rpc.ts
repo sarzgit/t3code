@@ -420,6 +420,8 @@ import {
   MusicImportHistoryResult,
   MusicLibrarySearch,
   MusicListTracksInput,
+  MusicNativeQueue,
+  MusicNativeQueueInput,
   MusicPlayerState,
   MusicPlaylists,
   MusicPlaylistTracks,
@@ -647,6 +649,7 @@ export const WS_METHODS = {
   musicPlayTrack: "music.playTrack",
   musicSearchLibrary: "music.searchLibrary",
   musicGetUpNext: "music.getUpNext",
+  musicGetNativeQueue: "music.getNativeQueue",
   musicControl: "music.control",
   musicGetArtwork: "music.getArtwork",
   musicGetStats: "music.getStats",
@@ -1852,6 +1855,12 @@ const WsMusicGetUpNextRpc = Rpc.make(WS_METHODS.musicGetUpNext, {
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
 });
 
+const WsMusicGetNativeQueueRpc = Rpc.make(WS_METHODS.musicGetNativeQueue, {
+  payload: MusicNativeQueueInput,
+  success: MusicNativeQueue,
+  error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
+});
+
 const WsMusicControlRpc = Rpc.make(WS_METHODS.musicControl, {
   payload: MusicControlInput,
   error: Schema.Union([MusicError, EnvironmentAuthorizationError]),
@@ -2381,6 +2390,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsMusicPlayTrackRpc,
   WsMusicSearchLibraryRpc,
   WsMusicGetUpNextRpc,
+  WsMusicGetNativeQueueRpc,
   WsMusicControlRpc,
   WsMusicGetArtworkRpc,
   WsMusicGetStatsRpc,

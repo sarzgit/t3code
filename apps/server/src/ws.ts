@@ -3222,6 +3222,7 @@ export const layerWsRpc = (
         [WS_METHODS.musicPlayTrack]: (input) => musicPlayer.playTrack(input),
         [WS_METHODS.musicSearchLibrary]: (input) => musicPlayer.searchLibrary(input),
         [WS_METHODS.musicGetUpNext]: (input) => musicPlayer.upNext(input),
+        [WS_METHODS.musicGetNativeQueue]: () => musicPlayer.nativeQueue,
         [WS_METHODS.musicControl]: (input) => musicPlayer.control(input),
         [WS_METHODS.musicGetArtwork]: (input) => musicPlayer.artwork(input),
         [WS_METHODS.musicGetStats]: (input) => musicPlayer.stats(input),

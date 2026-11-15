@@ -235,6 +235,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.musicPlayTrack]: "music",
   [WS_METHODS.musicSearchLibrary]: "music",
   [WS_METHODS.musicGetUpNext]: "music",
+  [WS_METHODS.musicGetNativeQueue]: "music",
   [WS_METHODS.musicGetStats]: "music",
   [WS_METHODS.musicImportHistory]: "music",
   [WS_METHODS.musicClearHistory]: "music",

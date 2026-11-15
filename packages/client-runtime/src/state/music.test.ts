@@ -46,16 +46,8 @@ describe("musicUpNextSource", () => {
   it.each([
     ["nothing when stopped", ready({ playback: "stopped", playingFrom }), "nothing-playing"],
     ["nothing without a song", ready({ track: null }), "nothing-playing"],
-    [
-      "Music's queue for a whole playlist",
-      ready({ playlistId: playingFrom.playlistId }),
-      "music-queue",
-    ],
-    [
-      "Music's queue under Music's own shuffle",
-      ready({ playingFrom, shuffle: true }),
-      "music-queue",
-    ],
+    ["Music's queue for a whole playlist", ready({ playlistId: playingFrom.playlistId }), "native"],
+    ["Music's queue under Music's own shuffle", ready({ playingFrom, shuffle: true }), "native"],
     [
       "known under T3's shuffle",
       ready({ playingFrom: { ...playingFrom, shuffle: { seed: 9, first: 4 } }, shuffle: true }),
@@ -79,6 +71,17 @@ describe("musicUpNextSource", () => {
     });
     const once = musicUpNextSource(ready({ playingFrom, repeat: "off" }));
     expect(once._tag === "known" && once.input.wrap).toBe(false);
+  });
+
+  it("reads Music's own queue only when Music runs it", () => {
+    expect(musicUpNextSource(ready({ shuffle: true }))).toEqual({
+      _tag: "native",
+      trackId: "3BA40D4A07B97011",
+    });
+    // A song T3 steps through never asks Music's panel, shuffled or not.
+    const t3Shuffle = { ...playingFrom, shuffle: { seed: 9, first: null } };
+    expect(musicUpNextSource(ready({ playingFrom: t3Shuffle, shuffle: true }))._tag).toBe("known");
+    expect(musicUpNextSource(ready({ playingFrom }))._tag).toBe("known");
   });
 
   it("lists T3's shuffle only while Music's shuffle is on", () => {

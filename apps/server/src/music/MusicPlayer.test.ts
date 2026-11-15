@@ -1097,6 +1097,125 @@ describe("MusicPlayer", () => {
     }),
   );
 
+  it.effect("reads Music's own Up Next panel as sections after its header", () =>
+    Effect.gen(function* () {
+      const song = (label: string) => ({
+        texts: [label],
+        buttons: [{ id: "actionButton", label: "More" }],
+      });
+      const header = (title: string, source: string | null) => ({
+        texts: [title],
+        buttons: [
+          ...(source === null ? [] : [{ id: "from", label: source }]),
+          { id: "action", label: "Clear" },
+        ],
+      });
+      const panel = (rows: ReadonlyArray<unknown>, lastVisibleIndex: number, rowCount: number) =>
+        output({ stdout: JSON.stringify({ kind: "panel", rows, lastVisibleIndex, rowCount }) });
+      const replies = [
+        // History first, then Music's queue; a song queued twice stays twice.
+        panel(
+          [
+            song("Distinto Beny Jr — 3O"),
+            header("Continue Playing", "From musics!"),
+            song("Vacile Yan Block — Vacile - Single"),
+            song("Fuma Bad Gyal — Fuma - Single"),
+            song("Fuma Bad Gyal — Fuma - Single"),
+          ],
+          23,
+          302,
+        ),
+        // Headers are found by Music's buttons, so any language works; the list ends on screen.
+        panel(
+          [
+            header("Als Nächstes", null),
+            song("A"),
+            header("Weiter abspielen", "Von Mix"),
+            song("B"),
+          ],
+          3,
+          4,
+        ),
+        panel([song("Old one"), song("Old two")], 10, 302),
+        panel(
+          [
+            header("Continue Playing", "From musics!"),
+            song("Drawn"),
+            { texts: [], buttons: [] },
+            song("Later"),
+          ],
+          3,
+          4,
+        ),
+        output({ stdout: JSON.stringify({ kind: "closed" }) }),
+        output({ stdout: JSON.stringify({ kind: "unrecognised" }) }),
+        output({
+          code: ChildProcessSpawner.ExitCode(1),
+          stderr: "execution error: Not authorized to send Apple events to System Events. (-1743)",
+        }),
+        output({
+          code: ChildProcessSpawner.ExitCode(1),
+          stderr: "execution error: osascript is not allowed assistive access. (-1719)",
+        }),
+        output({
+          code: ChildProcessSpawner.ExitCode(1),
+          stderr: "execution error: something else (-1728)",
+        }),
+      ];
+      const { calls, runner } = yield* makeHarness({
+        respond: () => Effect.succeed(replies.shift()!),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const read = Effect.gen(function* () {
+          yield* TestClock.adjust("3 seconds");
+          return yield* player.nativeQueue;
+        });
+        assert.deepStrictEqual(yield* read, {
+          _tag: "ok",
+          sections: [
+            {
+              title: "Continue Playing",
+              source: "From musics!",
+              songs: [
+                "Vacile Yan Block — Vacile - Single",
+                "Fuma Bad Gyal — Fuma - Single",
+                "Fuma Bad Gyal — Fuma - Single",
+              ],
+            },
+          ],
+          complete: false,
+        });
+        assert.deepStrictEqual(yield* read, {
+          _tag: "ok",
+          sections: [
+            { title: "Als Nächstes", source: null, songs: ["A"] },
+            { title: "Weiter abspielen", source: "Von Mix", songs: ["B"] },
+          ],
+          complete: true,
+        });
+        assert.deepStrictEqual(yield* read, { _tag: "no-upcoming-visible" });
+        assert.deepStrictEqual(yield* read, {
+          _tag: "ok",
+          sections: [{ title: "Continue Playing", source: "From musics!", songs: ["Drawn"] }],
+          complete: false,
+        });
+        assert.deepStrictEqual(yield* read, { _tag: "panel-closed" });
+        assert.deepStrictEqual(yield* read, { _tag: "unrecognised" });
+        assert.deepStrictEqual(yield* read, { _tag: "permission-needed", grant: "automation" });
+        assert.deepStrictEqual(yield* read, { _tag: "permission-needed", grant: "accessibility" });
+        const failed = yield* Effect.flip(read);
+        assert.deepStrictEqual([failed.operation, failed.reason], ["native-queue", "unavailable"]);
+        // Clients asking at about the same time share one read of Music's panel.
+        const before = (yield* Ref.get(calls)).length;
+        replies.push(output({ stdout: JSON.stringify({ kind: "closed" }) }));
+        yield* read;
+        yield* player.nativeQueue;
+        assert.strictEqual((yield* Ref.get(calls)).length, before + 1);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect("lists what plays next by position, wrapping only for repeat all", () =>
     Effect.gen(function* () {
       const many = Array.from({ length: 40 }, (_, i) => ({

@@ -67,6 +67,14 @@ export function createMusicEnvironmentAtoms<R, E>(
       staleTimeMs: 0,
       idleTtlMs: 0,
     }),
+    // Music's own queue changes in Music without telling T3, so it is re-read while shown.
+    nativeQueue: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:music:native-queue",
+      tag: WS_METHODS.musicGetNativeQueue,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+      refreshIntervalMs: 10_000,
+    }),
     // Opening the Stats tab re-reads; the server buffers a minute of listening before writing.
     stats: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:music:stats",
@@ -174,15 +182,16 @@ export function formatTrackTime(totalSeconds: number): string {
 
 export type MusicUpNextSource =
   | { readonly _tag: "nothing-playing" }
-  /** Music runs its own queue (a whole playlist, shuffle, Autoplay) and does not share it. */
-  | { readonly _tag: "music-queue" }
+  /** Music runs its own queue (Play or Shuffle in Music, Autoplay); its Up Next panel is read. */
+  | { readonly _tag: "native"; readonly trackId: string }
   /** Repeat one: the current song plays again until someone skips. */
   | { readonly _tag: "repeating" }
   | { readonly _tag: "known"; readonly input: MusicUpNextInput };
 
 /**
- * Up Next is only listed while T3 Code moves through a playlist itself, in its own shuffled
- * order when Music's shuffle is on. Music's flag decides each step, so it decides here too.
+ * T3's own list while T3 Code moves through a playlist itself, in its own shuffled order when
+ * Music's shuffle is on (Music's flag decides each step, so it decides here too). Otherwise the
+ * queue is Music's, read from its Up Next panel.
  */
 export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
   if (state._tag !== "ready" || state.track === null || state.playback === "stopped") {
@@ -190,7 +199,7 @@ export function musicUpNextSource(state: MusicPlayerState): MusicUpNextSource {
   }
   const from = state.playingFrom;
   if (from === undefined || (state.shuffle && from.shuffle === undefined)) {
-    return { _tag: "music-queue" };
+    return { _tag: "native", trackId: state.track.id };
   }
   if (state.repeat === "one") return { _tag: "repeating" };
   return {

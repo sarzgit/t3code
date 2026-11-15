@@ -82,6 +82,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.musicListTracks,
       WS_METHODS.musicSearchLibrary,
       WS_METHODS.musicGetUpNext,
+      WS_METHODS.musicGetNativeQueue,
       WS_METHODS.musicGetStats,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);

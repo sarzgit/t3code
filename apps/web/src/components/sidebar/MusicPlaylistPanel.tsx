@@ -498,13 +498,8 @@ function UpNext({
       </p>
     );
   }
-  if (source._tag === "music-queue") {
-    return (
-      <div className={cn(EMPTY_TEXT_CLASS, "flex flex-col gap-0.5")}>
-        <p>Music doesn't share its queue.</p>
-        <p>Play a song from a playlist or search to see what's next.</p>
-      </div>
-    );
+  if (source._tag === "native") {
+    return <NativeUpNext environmentId={environmentId} trackId={source.trackId} />;
   }
   if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
   const { playlistName, tracks } = query.data;
@@ -534,6 +529,81 @@ function UpNext({
           </ol>
         </ScrollArea>
       ) : null}
+    </div>
+  );
+}
+
+const NATIVE_QUEUE_MESSAGES = {
+  "not-running": "Nothing playing",
+  "panel-closed": "Open Up Next in Music to see what's next.",
+  unrecognised: "T3 Code can't read Music's Up Next here. Open it in Music's Mini Player.",
+  "no-upcoming-visible": "Scroll Music's Up Next to the upcoming songs.",
+} as const;
+
+const NATIVE_QUEUE_GRANTS = {
+  accessibility:
+    "Allow T3 Code in System Settings › Privacy & Security › Accessibility to show Music's Up Next.",
+  automation:
+    "Allow T3 Code to control System Events in System Settings › Privacy & Security › Automation to show Music's Up Next.",
+} as const;
+
+/** Keys for labels that can repeat: the label and how many times it came before. */
+function keyedByOccurrence(labels: ReadonlyArray<string>) {
+  const seen = new Map<string, number>();
+  return labels.map((label) => {
+    const count = seen.get(label) ?? 0;
+    seen.set(label, count + 1);
+    return { label, key: `${count}:${label}` };
+  });
+}
+
+/** Music's own Up Next, as its panel shows it. T3 only reads it. */
+function NativeUpNext({
+  environmentId,
+  trackId,
+}: {
+  environmentId: EnvironmentId;
+  trackId: string;
+}) {
+  const query = useEnvironmentQuery(
+    musicEnvironment.nativeQueue({ environmentId, input: { trackId } }),
+  );
+  if (query.data === null) return <QueryProblem error={query.error} onRetry={query.refresh} />;
+  const queue = query.data;
+  if (queue._tag === "permission-needed") {
+    return <p className={EMPTY_TEXT_CLASS}>{NATIVE_QUEUE_GRANTS[queue.grant]}</p>;
+  }
+  if (queue._tag !== "ok")
+    return <p className={EMPTY_TEXT_CLASS}>{NATIVE_QUEUE_MESSAGES[queue._tag]}</p>;
+  if (queue.sections.every((section) => section.songs.length === 0)) {
+    return <p className={EMPTY_TEXT_CLASS}>Nothing up next in Music</p>;
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <ScrollArea className="max-h-64" scrollFade>
+        {keyedByOccurrence(
+          queue.sections.map((section) =>
+            [section.title, section.source].filter(Boolean).join(" · "),
+          ),
+        ).map(({ label: heading, key }, sectionIndex) => {
+          const songs = queue.sections[sectionIndex]!.songs;
+          return (
+            <section key={key} aria-label={heading} className="flex flex-col">
+              <p className="truncate px-2 pt-1 pb-0.5 text-xs text-muted-foreground">{heading}</p>
+              <ol className="flex flex-col">
+                {keyedByOccurrence(songs).map(({ label, key: songKey }) => (
+                  <li key={songKey} className="truncate px-2 py-1.5 text-sm">
+                    {label}
+                  </li>
+                ))}
+              </ol>
+            </section>
+          );
+        })}
+      </ScrollArea>
+      {queue.complete ? null : (
+        <p className="px-2 text-xs text-muted-foreground">More in Music's Up Next</p>
+      )}
     </div>
   );
 }
