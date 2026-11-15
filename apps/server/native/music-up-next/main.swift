@@ -7,19 +7,6 @@ import Security
 // not T3 Code, responsible for Accessibility. Accessibility lets it read and control other apps'
 // windows; this code only ever reads Music's play-queue panel.
 
-/// The AXUIElements in a CFArray; nil when the value is not one.
-func elements(_ value: CFTypeRef?) -> [AXUIElement]? {
-  guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return nil }
-  let array = value as! CFArray
-  var result: [AXUIElement] = []
-  for i in 0..<CFArrayGetCount(array) {
-    let item = unsafeBitCast(CFArrayGetValueAtIndex(array, i), to: CFTypeRef.self)
-    guard CFGetTypeID(item) == AXUIElementGetTypeID() else { return nil }
-    result.append(item as! AXUIElement)
-  }
-  return result
-}
-
 struct AXNode: Node {
   let element: AXUIElement
   private func copy(_ name: String) -> (AXError, CFTypeRef?) {
@@ -76,11 +63,12 @@ let environment = ProcessInfo.processInfo.environment
 guard let output = environment["T3_MUSIC_UP_NEXT_OUT"], output.hasSuffix("/queue.json"),
       !FileManager.default.fileExists(atPath: output),
       let request = environment["T3_MUSIC_UP_NEXT_REQUEST"], !request.isEmpty, request.count <= 64,
-      request.allSatisfy({ $0.isNumber || $0 == "-" })
+      request.allSatisfy({ ($0.isASCII && $0.isNumber) || $0 == "-" })
 else {
   exit(64)
 }
 // On its own queue, so it fires even while the main thread waits on Accessibility.
+let deadline = Date().addingTimeInterval(10)
 DispatchQueue.global().asyncAfter(deadline: .now() + 10) { exit(75) }
 #if STALL_TEST
 Thread.sleep(forTimeInterval: 30)
@@ -107,8 +95,9 @@ if !AXIsProcessTrusted() {
   write(QueueRead(kind: "permission-needed"))
   if environment["T3_MUSIC_UP_NEXT_PROMPT"] == "1", !FileManager.default.fileExists(atPath: marker.path) {
     _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
-    // The dialog is shown asynchronously; staying up lets macOS show it. The watchdog still holds.
-    let until = Date().addingTimeInterval(8)
+    // The dialog is shown asynchronously; staying up lets macOS show it. Stop a second before the
+    // watchdog so the marker is always written and the dialog never repeats.
+    let until = deadline.addingTimeInterval(-1)
     while Date() < until, !AXIsProcessTrusted() {
       RunLoop.main.run(until: Date().addingTimeInterval(0.5))
     }

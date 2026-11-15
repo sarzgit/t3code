@@ -66,6 +66,10 @@ check("container without table", readQueue(windows: [reshaped]), QueueRead(kind:
 let failing = Fixture(role: "AXWindow", title: "Mini Player", children: [queueToggle, Fixture(role: "AXGroup", children: nil)])
 check("failed read is not closed", readQueue(windows: [failing]), QueueRead(kind: "unrecognised"))
 
+// A failed read before the panel doesn't hide it.
+let flakyFirst = Fixture(role: "AXWindow", title: "Mini Player", children: [Fixture(role: "AXGroup", children: nil), panel(rows, rowCount: 302)])
+check("panel after a failed read", readQueue(windows: [flakyFirst]).kind, "panel")
+
 // The Mini Player closed but another window cut short: unrecognised.
 let miniClosed = Fixture(role: "AXWindow", title: "Mini Player", children: [queueToggle])
 check("closed needs every window", readQueue(windows: [busy, miniClosed]), QueueRead(kind: "unrecognised"))
@@ -79,5 +83,7 @@ let many = (0..<100).map { cellRow($0, [text("Song \($0)"), button("actionButton
 let capped = readQueue(windows: [Fixture(role: "AXWindow", title: "Mini Player", children: [panel(many, rowCount: 100)])])
 check("cap rows", capped.rows?.count, 80)
 check("cap last index", capped.lastVisibleIndex, 79)
+
+checkElementsAreRetained()
 
 if failures == 0 { print("reader tests passed") } else { print("\(failures) failed"); exit(1) }

@@ -9,7 +9,8 @@ app="$dest/T3 Music Up Next.app"
 mkdir -p "$app/Contents/MacOS"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
 xcrun swiftc -O -swift-version 5 -o "$app/Contents/MacOS/T3 Music Up Next" \
-  "$here/Reader.swift" "$here/main.swift" -framework AppKit -framework ApplicationServices
+  "$here/Reader.swift" "$here/AXElements.swift" "$here/main.swift" \
+  -framework AppKit -framework ApplicationServices
 codesign --force --options runtime --sign - "$app"
 codesign --verify --strict "$app"
 details="$(codesign -dv "$app" 2>&1)"

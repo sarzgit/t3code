@@ -63,6 +63,8 @@ func searchWindow<N: Node>(_ window: N) -> WindowSearch<N> {
   var pending: [N] = [window]
   var seen = 0
   var sawQueueButton = false
+  // A failed read elsewhere doesn't hide the panel; it only stops this window proving it closed.
+  var failed = false
   while !pending.isEmpty {
     if seen >= maxElementsPerWindow { return .inconclusive }
     let node = pending.removeFirst()
@@ -73,10 +75,13 @@ func searchWindow<N: Node>(_ window: N) -> WindowSearch<N> {
     }
     if let id = node.identifier, id.hasSuffix("queueButton") { sawQueueButton = true }
     if let role = node.role, leafRoles.contains(role) { continue }
-    guard let children = node.children else { return .inconclusive }
+    guard let children = node.children else {
+      failed = true
+      continue
+    }
     pending.append(contentsOf: children)
   }
-  return .searched(sawQueueButton: sawQueueButton)
+  return failed ? .inconclusive : .searched(sawQueueButton: sawQueueButton)
 }
 
 func readRow<N: Node>(_ row: N) -> QueueRow {

@@ -1421,10 +1421,11 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       return queue === null ? yield* unavailable() : queue;
     },
     Effect.scoped,
-    helperLock.withPermits(1),
     // The helper runs outside this process; a cancelled request must not free the lock while it
-    // still runs. Bounded by the launch timeout and the helper's own 10 s exit.
+    // still runs. Bounded by the launch timeout and the helper's own 10 s exit. Waiting for the
+    // lock stays cancellable.
     Effect.uninterruptible,
+    helperLock.withPermits(1),
   );
 
   const nativeQueueCache = yield* Cache.makeWith((_trackId: string) => readNativeQueue(), {
