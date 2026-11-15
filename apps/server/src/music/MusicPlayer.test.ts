@@ -1,7 +1,7 @@
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { type MusicPlayerState, ProjectId } from "@t3tools/contracts";
+import { type MusicPlayerState, type MusicQueueStatus, ProjectId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -17,6 +17,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
 import * as MusicListeningStats from "./MusicListeningStats.ts";
 import * as MusicPlayer from "./MusicPlayer.ts";
+import * as MusicQueueStore from "./MusicQueueStore.ts";
 
 const output = (
   overrides: Partial<ProcessRunner.ProcessRunOutput> = {},
@@ -95,9 +96,11 @@ const providePlayer = (
   runner: ProcessRunner.ProcessRunner["Service"],
   platform: NodeJS.Platform = "darwin",
   upNextHelper = "/nonexistent/T3 Music Up Next.app",
+  queueStore: Layer.Layer<MusicQueueStore.MusicQueueStore> = MusicQueueStore.layerMemory(),
 ) =>
   Effect.provide(
     MusicPlayer.layerWith({ upNextHelper }).pipe(
+      Layer.provideMerge(queueStore),
       Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
       Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
       Layer.provide(MusicListeningStats.layerMemory),
@@ -1544,6 +1547,303 @@ describe("MusicPlayer", () => {
         assert.deepStrictEqual(stats.projects, [
           { projectId: ProjectId.make("project-1"), seconds: 2 },
         ]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+});
+
+const queueSongs = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({ id: `ABCDEF01234500${String(i).padStart(2, "0")}` }));
+
+const subscribeQueue = Effect.fn("subscribeQueue")(function* (
+  player: MusicPlayer.MusicPlayer["Service"],
+) {
+  const statuses = yield* Queue.unbounded<MusicQueueStatus>();
+  yield* player.queueStream.pipe(
+    Stream.runForEach((status) => Queue.offer(statuses, status)),
+    Effect.forkScoped,
+  );
+  return statuses;
+});
+
+const until = <A>(queue: Queue.Queue<A>, predicate: (value: A) => boolean): Effect.Effect<A> =>
+  Queue.take(queue).pipe(Effect.filterOrElse(predicate, () => until(queue, predicate)));
+
+const playingSample = (trackId: string, overrides: Record<string, unknown> = {}) =>
+  sampleLine({
+    state: "playing",
+    position: 5,
+    track: { id: trackId, duration: 200 },
+    ...overrides,
+  });
+
+describe("MusicPlayer queue", () => {
+  it.effect(
+    "names a playlist queue, makes it explicit on its first edit and steps through it",
+    () =>
+      Effect.gen(function* () {
+        const songs = queueSongs(5);
+        const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+        const { calls, sessions, runner } = yield* makeHarness({
+          respond: (args) => runFakeScript(args, fake.music),
+        });
+        const stepCalls = Ref.get(calls).pipe(
+          Effect.map((all) => all.filter((args) => args[4]!.includes('"exhausted:"')).length),
+        );
+        yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const statuses = yield* subscribeQueue(player);
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(sessions);
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 });
+          const active = (yield* until(statuses, (status) => status.active !== null)).active!;
+          assert.deepStrictEqual(
+            { revision: active.revision, edited: active.edited, currentKey: active.currentKey },
+            { revision: 0, edited: false, currentKey: "s1" },
+          );
+          session.emit(playingSample(songs[1]!.id));
+          yield* Queue.take(received);
+          const view = yield* player.getQueue({ queueId: active.id });
+          assert.strictEqual(view.sourceCount, 5);
+          assert.deepStrictEqual(
+            view.upcoming.map((entry) => entry.key),
+            ["s2", "s3", "s4"],
+          );
+
+          const playNext = {
+            _tag: "play-next" as const,
+            songs: [{ playlistId: PLAYLIST_ID, trackId: songs[4]!.id, index: 4 }],
+          };
+          // A stale pair, or a playlist whose size changed since the read, changes nothing.
+          for (const input of [
+            { queueId: active.id, expectedRevision: 1, sourceCount: 5, edit: playNext },
+            { queueId: active.id, expectedRevision: 0, sourceCount: 4, edit: playNext },
+          ]) {
+            assert.strictEqual(
+              (yield* Effect.flip(player.editQueue(input))).reason,
+              "queue-changed",
+            );
+          }
+          const ref = yield* player.editQueue({
+            queueId: active.id,
+            expectedRevision: 0,
+            sourceCount: 5,
+            edit: playNext,
+          });
+          assert.deepStrictEqual(ref, { id: active.id, revision: 1 });
+          yield* until(statuses, (status) => status.active?.edited === true);
+          const edited = yield* player.getQueue({ queueId: active.id });
+          assert.deepStrictEqual(
+            edited.upcoming.map((entry) => [entry.key, entry.trackId]),
+            [
+              ["a0", songs[4]!.id],
+              ["s2", songs[2]!.id],
+              ["s3", songs[3]!.id],
+              ["s4", songs[4]!.id],
+            ],
+          );
+          assert.strictEqual(edited.upcoming[0]!.name, `name ${songs[4]!.id}`);
+
+          yield* player.control({ _tag: "next" });
+          assert.strictEqual(fake.played.at(-1), `${songs[4]!.id}#4`);
+          yield* until(statuses, (status) => status.active?.currentKey === "a0");
+
+          // A song gone from the playlist is skipped inside the same step script.
+          songs[2]!.id = "FFFF000000000002";
+          const before = yield* stepCalls;
+          yield* player.control({ _tag: "next" });
+          assert.strictEqual(yield* stepCalls, before + 1);
+          assert.strictEqual(fake.played.at(-1), `${songs[3]!.id}#3`);
+          yield* until(statuses, (status) => status.active?.currentKey === "s3");
+
+          // With every candidate gone Music stops; T3 never hands Next to Music's own queue.
+          songs[4]!.id = "FFFF000000000004";
+          yield* player.control({ _tag: "next" });
+          assert.deepStrictEqual(fake.played.slice(-1), ["stop"]);
+          assert.isFalse(fake.played.includes("music next"));
+          const saved = (yield* until(statuses, (status) => status.saved !== null)).saved!;
+          assert.strictEqual(saved.id, active.id);
+          assert.deepStrictEqual(
+            [saved.trackName, saved.artist, saved.sourceName],
+            ["Saved song", null, "Mix"],
+          );
+        }).pipe(providePlayer(runner), Effect.scoped);
+      }),
+  );
+
+  it.effect("resumes a saved queue after a restart from its files alone", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(4);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const first = yield* makeHarness({
+        respond: (args) =>
+          args[4]!.includes("userPlaylists")
+            ? Effect.succeed(
+                output({
+                  stdout: JSON.stringify([{ id: PLAYLIST_ID, name: "Mix: Été", durationSec: 9 }]),
+                }),
+              )
+            : runFakeScript(args, fake.music),
+      });
+      const files = yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const store = yield* MusicQueueStore.MusicQueueStore;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(first.sessions);
+        yield* player.listPlaylists;
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 });
+        const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+        session.emit(playingSample(songs[0]!.id));
+        yield* Queue.take(received);
+        yield* player.editQueue({
+          queueId: id,
+          expectedRevision: 0,
+          sourceCount: 4,
+          edit: { _tag: "remove", targets: [{ key: "s1", trackId: songs[1]!.id }] },
+        });
+        yield* player.control({ _tag: "next" });
+        const track = { id: songs[2]!.id, name: "Été: Live", artist: "Ärtist", duration: 200 };
+        session.emit(sampleLine({ state: "playing", position: 42, track }));
+        yield* until(received, (state) => state._tag === "ready" && state.track?.id === track.id);
+        yield* store.settled;
+        return yield* store.load;
+      }).pipe(providePlayer(first.runner), Effect.scoped);
+
+      const second = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const saved = (yield* Queue.take(statuses)).saved!;
+        assert.deepStrictEqual(
+          { ...saved, id: "" },
+          {
+            id: "",
+            revision: 1,
+            trackName: "Été: Live",
+            artist: "Ärtist",
+            sourceName: "Mix: Été",
+            positionSec: 42,
+            sourceMissing: false,
+          },
+        );
+        // Starting up never asks Music anything.
+        assert.deepStrictEqual(yield* Ref.get(second.calls), []);
+        const stale = yield* Effect.flip(player.resumeQueue({ queueId: saved.id, revision: 0 }));
+        assert.strictEqual(stale.reason, "queue-changed");
+        yield* player.resumeQueue({ queueId: saved.id, revision: 1 });
+        assert.strictEqual(fake.played.at(-1), `${songs[2]!.id}#2`);
+        assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), ["seek", "42"]);
+        const resumed = (yield* until(statuses, (status) => status.active !== null)).active;
+        assert.deepStrictEqual(resumed, {
+          id: saved.id,
+          revision: 1,
+          edited: true,
+          currentKey: "s2",
+        });
+        const view = yield* player.getQueue({ queueId: saved.id });
+        assert.deepStrictEqual(
+          view.upcoming.map((entry) => entry.key),
+          ["s3"],
+        );
+      }).pipe(
+        providePlayer(second.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("holds a replaced edited queue for one Undo", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(4);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const { calls, sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 });
+        const replacedId = (yield* until(statuses, (status) => status.active !== null)).active!.id;
+        session.emit(playingSample(songs[0]!.id, { position: 30 }));
+        yield* Queue.take(received);
+        yield* player.editQueue({
+          queueId: replacedId,
+          expectedRevision: 0,
+          sourceCount: 4,
+          edit: { _tag: "clear-upcoming" },
+        });
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[3]!.id, index: 3 });
+        const { replaced, active } = yield* until(statuses, (status) => status.replaced !== null);
+        assert.deepStrictEqual(
+          { ...replaced!, expiresAt: 0 },
+          { replacedId, replacedRevision: 1, byId: active!.id, byRevision: 0, expiresAt: 0 },
+        );
+        const undo = { replacedId, replacedRevision: 1, byId: active!.id, byRevision: 0 };
+        assert.deepStrictEqual(yield* player.undoReplace(undo), { id: replacedId, revision: 1 });
+        assert.strictEqual(fake.played.at(-1), `${songs[0]!.id}#0`);
+        assert.deepStrictEqual((yield* Ref.get(calls)).at(-1)!.slice(5), ["seek", "30"]);
+        const restored = yield* until(statuses, (status) => status.active?.id === replacedId);
+        assert.deepStrictEqual(restored.replaced, null);
+        assert.strictEqual((yield* Effect.flip(player.undoReplace(undo))).reason, "queue-changed");
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("resets to playlist order and hands back to the formula once Music confirms", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(6);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      fake.player.shuffle = true;
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[2]!.id, index: 2 });
+        const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+        session.emit(playingSample(songs[2]!.id, { shuffle: true }));
+        yield* Queue.take(received);
+        // Learning Music's shuffle is a new order, so the revision moves on.
+        const shuffled = yield* until(statuses, (status) => status.active?.revision === 1);
+        assert.strictEqual(shuffled.active!.edited, false);
+        assert.isTrue((yield* player.getQueue({ queueId: id })).shuffled);
+        yield* player.editQueue({
+          queueId: id,
+          expectedRevision: 1,
+          sourceCount: 6,
+          edit: {
+            _tag: "play-next",
+            songs: [{ playlistId: PLAYLIST_ID, trackId: songs[5]!.id, index: 5 }],
+          },
+        });
+        const reset = yield* player.editQueue({
+          queueId: id,
+          expectedRevision: 2,
+          edit: { _tag: "reset" },
+        });
+        assert.deepStrictEqual(reset, { id, revision: 3 });
+        assert.isFalse(fake.player.shuffle);
+        const view = yield* player.getQueue({ queueId: id });
+        assert.deepStrictEqual(
+          [view.edited, view.shuffled, view.upcoming.map((entry) => entry.key)],
+          [true, false, ["s3", "s4", "s5"]],
+        );
+        // A sample read before the write landed is not a toggle; the confirming one hands off.
+        session.emit(playingSample(songs[2]!.id, { shuffle: true, position: 6 }));
+        session.emit(playingSample(songs[2]!.id, { shuffle: false, position: 7 }));
+        const handed = (yield* until(statuses, (status) => status.active?.edited === false)).active;
+        assert.deepStrictEqual(handed, { id, revision: 3, edited: false, currentKey: "s2" });
+        const formula = yield* player.getQueue({ queueId: id });
+        assert.deepStrictEqual(
+          [formula.sourceCount, formula.upcoming.map((entry) => entry.key)],
+          [6, ["s3", "s4", "s5"]],
+        );
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );

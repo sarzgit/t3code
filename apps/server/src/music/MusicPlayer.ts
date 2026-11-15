@@ -28,8 +28,11 @@ import {
   type MusicListFavoritesInput,
   type MusicListRecentInput,
   type MusicPlayListInput,
+  type MusicQueueEntry,
   type MusicQueueRef,
   type MusicQueueStatus,
+  type MusicReplacedQueue,
+  type MusicSongRef,
   type MusicQueueView,
   type MusicRecent,
   type MusicSavedQueueInput,
@@ -57,9 +60,16 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { localDayKey, MusicListeningStats } from "./MusicListeningStats.ts";
+import * as MusicQueue from "./MusicQueue.ts";
+import * as MusicQueueStore from "./MusicQueueStore.ts";
+
+type QueueDisplay = MusicQueueStore.QueueDisplay;
+type QueueFormula = MusicQueueStore.QueueFormula;
+const { sanitizeDisplay } = MusicQueueStore;
 
 export class MusicPlayer extends Context.Service<
   MusicPlayer,
@@ -425,6 +435,137 @@ const PLAY_SHUFFLED_SCRIPT = `function run(argv) {
   return "ok:" + target + ":" + list.ids[target] + ":" + (Music.shuffleEnabled() ? "on" : "off");
 }${SONGS_JXA}`;
 
+// STEP_SCRIPT's order for an unedited queue, read for Up Next with the same shuffle decision.
+// argv: playlist, song, position, seed, shuffle start, T3's shuffle mode when stopped, limit.
+const FORMULA_QUEUE_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const list = songs(Music, found[0]);
+  const ids = list.ids;
+  const given = Number(argv[2]);
+  const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
+  if (current < 0) return "not-found";
+  const shuffled = Music.playerState() === "stopped" ? argv[5] === "on" : Music.shuffleEnabled();
+  const start = shuffled ? (argv[4] === "none" ? "current" : argv[4]) : "none";
+  const sequence = shuffleOrder(ids.length, argv[3], start, current) || ids.map((_, i) => i);
+  const at = sequence.indexOf(current);
+  const shown = [current].concat(sequence.slice(at + 1, at + 1 + Number(argv[6])));
+  const tracks = found[0].tracks;
+  const names = list.pick(tracks.name());
+  const artists = list.pick(tracks.artist());
+  const durations = list.pick(tracks.duration());
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 300) : "");
+  return JSON.stringify({
+    playlistName: clip(found[0].name()),
+    count: ids.length,
+    shuffled: shuffled,
+    wraps: Music.songRepeat() === "all",
+    total: ids.length - at - 1,
+    tracks: shown.map((i) => ({ id: ids[i], index: i, name: clip(names[i]), artist: clip(artists[i]), durationSec: durations[i] })),
+  });
+}${SONGS_JXA}`;
+
+// The whole order STEP_SCRIPT would walk, played songs included, for a queue's first edit.
+// argv: as FORMULA_QUEUE_SCRIPT, with the most songs allowed in place of the limit.
+const MATERIALISE_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const ids = songs(Music, found[0]).ids;
+  if (ids.length > Number(argv[6])) return "too-long";
+  const given = Number(argv[2]);
+  const current = ids[given] === argv[1] ? given : ids.indexOf(argv[1]);
+  if (current < 0) return "not-found";
+  const shuffled = Music.playerState() === "stopped" ? argv[5] === "on" : Music.shuffleEnabled();
+  const start = shuffled ? (argv[4] === "none" ? "current" : argv[4]) : "none";
+  const sequence = shuffleOrder(ids.length, argv[3], start, current) || ids.map((_, i) => i);
+  return JSON.stringify({ ids: ids, sequence: sequence, current: current, shuffled: shuffled });
+}${SONGS_JXA}`;
+
+// Names for queue entries in one call, each found by position and checked against its id.
+// argv: the songs as JSON [{ playlistId, trackId, index }], and the source playlist or "none".
+const SONG_INFO_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const refs = JSON.parse(argv[0]);
+  const lists = Object.create(null);
+  const clip = (value) => (typeof value === "string" ? value.slice(0, 300) : "");
+  const open = (id) => {
+    if (!(id in lists)) {
+      const found = Music.playlists.whose({ persistentID: id })();
+      lists[id] = found.length === 0 ? null : { playlist: found[0], list: songs(Music, found[0]), columns: null };
+    }
+    return lists[id];
+  };
+  const out = refs.map((ref) => {
+    const entry = open(ref.playlistId);
+    if (entry === null) return null;
+    const ids = entry.list.ids;
+    const index = ids[ref.index] === ref.trackId ? ref.index : ids.indexOf(ref.trackId);
+    if (index < 0) return null;
+    if (entry.columns === null) {
+      const tracks = entry.playlist.tracks;
+      entry.columns = { names: entry.list.pick(tracks.name()), artists: entry.list.pick(tracks.artist()), durations: entry.list.pick(tracks.duration()) };
+    }
+    return { id: ids[index], index: index, name: clip(entry.columns.names[index]), artist: clip(entry.columns.artists[index]), durationSec: entry.columns.durations[index] };
+  });
+  let playlistName = null;
+  if (argv[1] !== "none") {
+    const source = Music.playlists.whose({ persistentID: argv[1] })();
+    if (source.length > 0) playlistName = clip(source[0].name());
+  }
+  return JSON.stringify({ playlistName: playlistName, wraps: Music.songRepeat() === "all", songs: out });
+}${SONGS_JXA}`;
+
+// STEP_SCRIPT for an edited queue: the same guards, then the first of the server's candidates
+// that still resolves. argv: current song, direction, Music's playlist for it, whether Music
+// confirmed it, and candidates as JSON without and with wrapping round (for repeat all).
+const QUEUE_STEP_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const automatic = argv[1] === "advance";
+  if (automatic && !Music.running()) return "gone";
+  const playback = Music.playerState();
+  if (automatic && playback === "paused") return "hold";
+  const onPick = playback !== "stopped" && Music.currentTrack.persistentID() === argv[0];
+  if (playback !== "stopped" && (automatic || argv[3] === "seen")) {
+    if (!onPick) return "changed";
+    if (argv[2] !== "none") {
+      let playlistId = null;
+      try { playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
+      if (playlistId !== null && playlistId !== argv[2]) return "changed";
+    }
+  }
+  if (automatic && playback !== "stopped" && (playback !== "playing" || Music.songRepeat() !== "all" || Music.playerPosition() >= 4)) return "hold";
+  const previous = argv[1] === "previous";
+  const restart = () => { Music.playerPosition = 0; return "restart"; };
+  const ownsPosition = onPick || playback === "stopped";
+  if (previous && ownsPosition && Music.playerPosition() > 3) return restart();
+  const wrap = Music.songRepeat() === "all";
+  const refs = JSON.parse(wrap ? argv[5] : argv[4]);
+  if (refs.length === 0) {
+    if (previous) return ownsPosition ? restart() : "hold";
+    Music.stop();
+    return "end";
+  }
+  const lists = Object.create(null);
+  for (let i = 0; i < refs.length; i++) {
+    const ref = refs[i];
+    if (!(ref.playlistId in lists)) {
+      const found = Music.playlists.whose({ persistentID: ref.playlistId })();
+      lists[ref.playlistId] = found.length === 0 ? null : songs(Music, found[0]);
+    }
+    const list = lists[ref.playlistId];
+    if (list === null) continue;
+    const target = list.ids[ref.index] === ref.trackId ? ref.index : list.ids.indexOf(ref.trackId);
+    if (target < 0) continue;
+    list.play(target);
+    return "ok:" + i + ":" + (wrap ? "w" : "f") + ":" + target;
+  }
+  // Every candidate is gone: stop as at an end, never Music's own Next.
+  Music.stop();
+  return "exhausted:" + (wrap ? "w" : "f");
+}${SONGS_JXA}`;
+
 const CONTROL_SCRIPT = `function run(argv) {
   const Music = Application("Music");
   switch (argv[0]) {
@@ -598,6 +739,53 @@ const RawUpNext = Schema.Struct({
 });
 const decodeRawUpNext = Schema.decodeUnknownOption(Schema.fromJsonString(RawUpNext));
 const UP_NEXT_LIMIT = 25;
+
+const RawQueueTrack = Schema.Struct({
+  id: Schema.String,
+  index: Schema.Number,
+  name: Schema.NullOr(Schema.String),
+  artist: Schema.NullOr(Schema.String),
+  durationSec: Schema.NullOr(Schema.Number),
+});
+const decodeRawFormulaQueue = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      playlistName: Schema.NullOr(Schema.String),
+      count: Schema.Number,
+      shuffled: Schema.Boolean,
+      wraps: Schema.Boolean,
+      total: Schema.Number,
+      tracks: Schema.Array(RawQueueTrack),
+    }),
+  ),
+);
+const decodeRawMaterialised = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      ids: Schema.Array(Schema.String),
+      sequence: Schema.Array(Schema.Number),
+      current: Schema.Number,
+      shuffled: Schema.Boolean,
+    }),
+  ),
+);
+const decodeRawSongInfo = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      playlistName: Schema.NullOr(Schema.String),
+      wraps: Schema.Boolean,
+      songs: Schema.Array(Schema.NullOr(RawQueueTrack)),
+    }),
+  ),
+);
+const MAX_QUEUE_OUTPUT_BYTES = 8 * 1024 * 1024;
+/** Positions save this often while playing, and at once on pause, a step or new labels. */
+const QUEUE_CHECKPOINT_MS = 15_000;
+const REPLACED_HOLD = Duration.seconds(30);
+/** Resume seeks only past this, and not into the last RESUME_TAIL_SECONDS. */
+const RESUME_MIN_SECONDS = 5;
+const RESUME_TAIL_SECONDS = 10;
+const UNAVAILABLE_SONG = "Unavailable song";
 
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
 const seconds = (value: number | null | undefined) =>
@@ -911,6 +1099,67 @@ const parseShuffleArg = (value: string | undefined): PickedSong["shuffle"] => {
   return value !== undefined && Number.isInteger(first) && first >= 0 ? { first } : null;
 };
 
+/** The one T3 queue an environment owns: active while T3 plays it, otherwise resumable. */
+interface QueueState {
+  readonly id: string;
+  readonly revision: number;
+  readonly active: boolean;
+  /** Null while an unedited playlist queue still steps by formula. */
+  readonly explicit: MusicQueue.ExplicitQueue | null;
+  /** How a formula queue steps; kept while saved so Resume restarts the same order. */
+  readonly formula: QueueFormula | null;
+  readonly currentKey: string;
+  readonly trackId: string;
+  readonly positionSec: number;
+  readonly display: QueueDisplay;
+  /** Only a live query or Resume sets this. */
+  readonly sourceMissing: boolean;
+}
+
+/** A Reset turned shuffle off and waits for Music to confirm before the formula takes over. */
+interface ResetAck {
+  readonly id: string;
+  readonly revision: number;
+  readonly confirmed: boolean;
+  readonly deadline: number;
+}
+
+const formulaOf = (picked: PickedSong): QueueFormula => ({
+  playlistId: picked.playlistId,
+  seed: picked.seed,
+  shuffleFirst: picked.shuffle === null ? null : (picked.shuffle.first ?? "free"),
+  shuffled: picked.shuffled,
+});
+
+const formulaShuffle = (formula: QueueFormula): PickedSong["shuffle"] =>
+  formula.shuffleFirst === null
+    ? null
+    : { first: formula.shuffleFirst === "free" ? null : formula.shuffleFirst };
+
+const sameFormula = (a: QueueFormula, b: QueueFormula) =>
+  a.playlistId === b.playlistId &&
+  a.seed === b.seed &&
+  a.shuffleFirst === b.shuffleFirst &&
+  a.shuffled === b.shuffled;
+
+/** The queue-level source label survives a step; song labels belong to one entry. */
+const sourceOnly = (display: QueueDisplay): QueueDisplay =>
+  display.sourceName === undefined ? {} : { sourceName: display.sourceName };
+
+const entryDisplay = (display: QueueDisplay, song: MusicQueue.QueueSong): QueueDisplay =>
+  sanitizeDisplay({
+    ...sourceOnly(display),
+    ...(song.meta === null ? {} : { trackName: song.meta.name, artist: song.meta.artist }),
+  });
+
+const QUEUE_PAGE = 50;
+
+/** Songs for a script's argv; only position, id and playlist ever reach Music. */
+const songRefsArgument = (refs: ReadonlyArray<MusicSongRef>) =>
+  JSON.stringify(
+    refs.map((ref) => ({ playlistId: ref.playlistId, trackId: ref.trackId, index: ref.index })),
+  );
+
 export type PickedSongUpdate =
   | { readonly _tag: "follow"; readonly picked: PickedSong; readonly hide: boolean }
   | { readonly _tag: "advance" }
@@ -1084,6 +1333,441 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   const picked = yield* Ref.make<PickedSong | null>(null);
   let sampleVersion = 0;
 
+  // The T3 queue. Its state changes only under pickLock, beside the pick it describes.
+  const store = yield* MusicQueueStore.MusicQueueStore;
+  const replacedTimer = yield* FiberHandle.make<void, never>();
+  let queue: QueueState | null = null;
+  /** Entries a step found gone; they show disabled. */
+  let unavailableKeys = new Set<string>();
+  /** Music's shuffle flag as last accepted for an explicit queue; null until a sample sets it. */
+  let musicShuffle: boolean | null = null;
+  /** After T3 writes shuffle, samples showing the old value are ignored until this passes. */
+  let settle: { readonly value: boolean; readonly deadline: number } | null = null;
+  let resetAck: ResetAck | null = null;
+  let replaced: { readonly info: MusicReplacedQueue; readonly held: QueueState } | null = null;
+  let lastCheckpointAt = 0;
+  let lastPlayback: string | null = null;
+  /** The last normal playlist list, for labels only; never fetched just for a label. */
+  let playlistNames: ReadonlyMap<string, string> = new Map();
+  let libraryId: string | null = null;
+
+  const savedFiles = yield* store.load;
+  if (savedFiles.body !== null) {
+    const body = savedFiles.body;
+    const saved = MusicQueueStore.resolveSaved(body, savedFiles.position);
+    if (saved === null) {
+      yield* Effect.logWarning("saved music queue does not hold together; ignoring it");
+    } else {
+      queue = {
+        id: body.id,
+        revision: body.revision,
+        active: false,
+        explicit: saved.explicit,
+        formula: body.formula ?? null,
+        currentKey: saved.currentKey,
+        trackId: saved.trackId,
+        positionSec: saved.positionSec,
+        display: saved.display,
+        sourceMissing: false,
+      };
+    }
+  }
+
+  const statusOf = (): MusicQueueStatus => ({
+    active:
+      queue?.active === true
+        ? {
+            id: queue.id,
+            revision: queue.revision,
+            edited: queue.explicit !== null,
+            currentKey: queue.currentKey,
+          }
+        : null,
+    saved:
+      queue !== null && !queue.active
+        ? {
+            id: queue.id,
+            revision: queue.revision,
+            trackName: queue.display.trackName ?? "Saved song",
+            artist: queue.display.artist ?? null,
+            sourceName: queue.display.sourceName ?? "Playlist",
+            positionSec: queue.positionSec,
+            sourceMissing: queue.sourceMissing,
+          }
+        : null,
+    replaced: replaced?.info ?? null,
+    // Favourites and Recently played revisions arrive with those lists (Stage 3).
+    favouritesRevision: 0,
+    recentRevision: 0,
+  });
+  const queueStatus = yield* SubscriptionRef.make(statusOf());
+  /** Publishes transitions only, never a sample. */
+  const publishQueue = Effect.suspend(() => {
+    const next = statusOf();
+    return SubscriptionRef.get(queueStatus).pipe(
+      Effect.flatMap((current) =>
+        JSON.stringify(current) === JSON.stringify(next)
+          ? Effect.void
+          : SubscriptionRef.set(queueStatus, next),
+      ),
+    );
+  });
+
+  const bodyOf = (state: QueueState): MusicQueueStore.QueueBody =>
+    state.explicit !== null
+      ? MusicQueueStore.bodyFromExplicit(state.explicit, state.display)
+      : {
+          version: 1,
+          id: state.id,
+          revision: state.revision,
+          currentKey: state.currentKey,
+          trackId: state.trackId,
+          display: state.display,
+          formula: state.formula!,
+        };
+  const positionOf = (state: QueueState, savedAt: number): MusicQueueStore.QueuePosition => ({
+    version: 1,
+    id: state.id,
+    revision: state.revision,
+    currentKey: state.currentKey,
+    trackId: state.trackId,
+    positionSec: state.positionSec,
+    savedAt,
+    display: state.display,
+  });
+
+  const clearReplaced = Effect.suspend(() => {
+    replaced = null;
+    return FiberHandle.clear(replacedTimer);
+  });
+
+  /** Makes `next` the queue, saves what changed and publishes. */
+  const commit = Effect.fnUntraced(function* (
+    next: QueueState,
+    write: "body" | "position" | "none",
+  ) {
+    queue = next;
+    const hold = replaced?.info;
+    // Undo is only for the queue that replaced it, unchanged and still playing.
+    if (
+      hold !== undefined &&
+      !(next.active && next.id === hold.byId && next.revision === hold.byRevision)
+    ) {
+      yield* clearReplaced;
+    }
+    if (write !== "none") {
+      const now = yield* Clock.currentTimeMillis;
+      lastCheckpointAt = now;
+      yield* write === "body"
+        ? store.saveBody(bodyOf(next), positionOf(next, now))
+        : store.savePosition(positionOf(next, now));
+    }
+    yield* publishQueue;
+  });
+
+  const forgetPending = () => {
+    settle = null;
+    resetAck = null;
+    musicShuffle = null;
+  };
+
+  const deactivate = Effect.suspend(() => {
+    const current = queue;
+    if (current === null || !current.active) return Effect.void;
+    forgetPending();
+    return commit({ ...current, active: false }, "position");
+  });
+
+  /** Follows the pick for a formula queue, and makes any queue inactive once T3 lets go. */
+  const syncQueue = Effect.gen(function* () {
+    const current = queue;
+    if (current === null || !current.active) return;
+    const pick = yield* Ref.get(picked);
+    if (pick === null) return yield* deactivate;
+    if (current.explicit !== null || current.formula === null) return;
+    const formula = formulaOf(pick);
+    const key = `s${pick.index}`;
+    const moved = key !== current.currentKey || pick.trackId !== current.trackId;
+    const reordered = !sameFormula(formula, current.formula);
+    if (!moved && !reordered) return;
+    // Pinning where a shuffle starts records the order already shown, so only a flag change
+    // is a new order.
+    const flipped = formula.shuffled !== current.formula.shuffled;
+    const next: QueueState = {
+      ...current,
+      formula,
+      revision: flipped ? current.revision + 1 : current.revision,
+      ...(moved
+        ? {
+            currentKey: key,
+            trackId: pick.trackId,
+            positionSec: 0,
+            display: sourceOnly(current.display),
+          }
+        : {}),
+    };
+    yield* commit(next, reordered ? "body" : "position");
+  });
+
+  const setPicked = (next: PickedSong | null) =>
+    Ref.set(picked, next).pipe(Effect.andThen(syncQueue));
+
+  const sourcePlaylistOf = (state: QueueState | null) =>
+    state === null
+      ? null
+      : state.explicit !== null
+        ? state.explicit.source.kind === "playlist"
+          ? state.explicit.source.playlistId
+          : null
+        : (state.formula?.playlistId ?? null);
+
+  const sourceNameFor = (playlistId: string) =>
+    playlistNames.get(playlistId) ?? (playlistId === libraryId ? "Library" : undefined);
+
+  /** A label from a normal read for the queue's source checkpoints at once if it changed. */
+  const noteSourceName = (queueId: string, playlistId: string, name: string | undefined) =>
+    Effect.suspend(() => {
+      const current = queue;
+      const label = sanitizeDisplay({ sourceName: name }).sourceName;
+      if (
+        current === null ||
+        current.id !== queueId ||
+        label === undefined ||
+        sourcePlaylistOf(current) !== playlistId ||
+        current.display.sourceName === label
+      ) {
+        return Effect.void;
+      }
+      return commit({ ...current, display: { ...current.display, sourceName: label } }, "position");
+    });
+
+  const newQueueId = Effect.map(
+    Effect.all([newSeed, newSeed]),
+    (parts) => `q${parts.map((part) => part.toString(36).padStart(6, "0")).join("")}`,
+  );
+
+  /** A new T3 play: a new queue. An edited one it replaces is held briefly for Undo. */
+  const startQueue = Effect.fn("MusicPlayer.startQueue")(function* (pick: PickedSong) {
+    const now = yield* Clock.currentTimeMillis;
+    const id = yield* newQueueId;
+    const old = queue;
+    yield* clearReplaced;
+    if (old !== null && old.explicit !== null) {
+      const info: MusicReplacedQueue = {
+        replacedId: old.id,
+        replacedRevision: old.revision,
+        byId: id,
+        byRevision: 0,
+        expiresAt: now + Duration.toMillis(REPLACED_HOLD),
+      };
+      replaced = { info, held: { ...old, active: false } };
+      yield* FiberHandle.run(
+        replacedTimer,
+        Effect.sleep(REPLACED_HOLD).pipe(
+          Effect.andThen(
+            pickLock.withPermits(1)(
+              Effect.suspend(() => {
+                if (replaced?.info !== info) return Effect.void;
+                replaced = null;
+                return publishQueue;
+              }),
+            ),
+          ),
+        ),
+      );
+    }
+    forgetPending();
+    unavailableKeys = new Set();
+    const sourceName = sourceNameFor(pick.playlistId);
+    yield* commit(
+      {
+        id,
+        revision: 0,
+        active: true,
+        explicit: null,
+        formula: formulaOf(pick),
+        currentKey: `s${pick.index}`,
+        trackId: pick.trackId,
+        positionSec: 0,
+        display: sourceName === undefined ? {} : { sourceName },
+        sourceMissing: false,
+      },
+      "body",
+    );
+  });
+
+  /** Once Music confirms a Reset's shuffle off, a playlist queue steps by formula again. */
+  const tryHandoff = Effect.gen(function* () {
+    const ack = resetAck;
+    const current = queue;
+    if (ack === null || current === null) return;
+    if (
+      !current.active ||
+      current.explicit === null ||
+      ack.id !== current.id ||
+      ack.revision !== current.revision
+    ) {
+      // Revoked. An unconfirmed Reset still consumes its late acknowledgement.
+      if (ack.confirmed) resetAck = null;
+      return;
+    }
+    if (!ack.confirmed) return;
+    const { source } = current.explicit;
+    if (source.kind !== "playlist") {
+      resetAck = null;
+      return;
+    }
+    const pick = yield* Ref.get(picked);
+    // An added song keeps playing; the handoff waits for the next source song.
+    if (MusicQueue.currentValue(current.explicit) < 0 || pick === null) return;
+    resetAck = null;
+    const next: PickedSong = {
+      ...pick,
+      playlistId: source.playlistId,
+      shuffle: null,
+      shuffled: false,
+    };
+    yield* Ref.set(picked, next);
+    yield* commit(
+      { ...current, explicit: null, formula: formulaOf(next), currentKey: `s${next.index}` },
+      "body",
+    );
+  });
+
+  const applyToggle = Effect.fn("MusicPlayer.toggleQueueShuffle")(function* (on: boolean) {
+    const current = queue;
+    if (current === null || current.explicit === null) return;
+    const explicit = MusicQueue.toggleShuffle(current.explicit, on, yield* newSeed);
+    yield* commit({ ...current, explicit, revision: explicit.revision }, "body");
+  });
+
+  /** One edge per change of Music's flag; T3's own writes and a pending Reset settle first. */
+  const observeShuffle = Effect.fnUntraced(function* (shuffle: boolean, now: number) {
+    const ack = resetAck;
+    if (ack !== null && !ack.confirmed) {
+      if (!shuffle) {
+        resetAck = { ...ack, confirmed: true };
+        musicShuffle = false;
+        settle = null;
+        yield* tryHandoff;
+      } else if (now >= ack.deadline) {
+        // The write did not take: report Music's flag, keep source order, never reshuffle.
+        musicShuffle = true;
+      }
+      return;
+    }
+    if (settle !== null) {
+      if (shuffle === settle.value) {
+        settle = null;
+        musicShuffle = shuffle;
+        return;
+      }
+      if (now < settle.deadline) return;
+      settle = null;
+    } else if (musicShuffle === null || shuffle === musicShuffle) {
+      musicShuffle = shuffle;
+      return;
+    }
+    musicShuffle = shuffle;
+    yield* applyToggle(shuffle);
+  });
+
+  /** Position and labels for the current entry, from a sample of the song itself. */
+  const observeQueueSample = Effect.fnUntraced(function* (state: MusicPlayerState) {
+    const current = queue;
+    if (current === null || !current.active || state._tag !== "ready") return;
+    const now = yield* Clock.currentTimeMillis;
+    const track = state.playback === "stopped" ? null : state.track;
+    if (track !== null && track.id === current.trackId) {
+      const display = sanitizeDisplay({
+        ...current.display,
+        trackName: track.name,
+        artist: track.artist,
+      });
+      const labelled =
+        display.trackName !== current.display.trackName ||
+        display.artist !== current.display.artist;
+      const due =
+        (state.playback === "paused" && lastPlayback === "playing") ||
+        (state.playback === "playing" && now - lastCheckpointAt >= QUEUE_CHECKPOINT_MS);
+      const next = { ...current, positionSec: state.positionSec, display };
+      if (labelled || due) {
+        yield* commit(next, "position");
+      } else {
+        queue = next;
+      }
+    }
+    lastPlayback = state.playback;
+    if (current.explicit !== null && state.playback !== "stopped") {
+      yield* observeShuffle(state.shuffle, now);
+    }
+  });
+
+  const stepExplicit = Effect.fn("MusicPlayer.stepQueue")(function* (
+    from: PickedSong,
+    direction: "next" | "previous" | "advance",
+  ) {
+    const current = queue;
+    const explicit = current?.explicit ?? null;
+    if (current === null || explicit === null) return "changed";
+    const options = MusicQueue.candidates(explicit, direction === "previous" ? "previous" : "next");
+    const refs = (list: ReadonlyArray<MusicQueue.Candidate>) =>
+      songRefsArgument(list.map(({ song }) => song));
+    const result = yield* runScript("control", "JavaScript", QUEUE_STEP_SCRIPT, [
+      from.trackId,
+      direction,
+      from.musicPlaylistId ?? "none",
+      from.seen ? "seen" : "unseen",
+      refs(options.forward),
+      refs(options.wrapped),
+    ]);
+    const [outcome, first, pool, second] = result.split(":");
+    if (outcome === "ok" || outcome === "restart" || outcome === "end" || outcome === "exhausted") {
+      sampleVersion++;
+    }
+    if (outcome === "hold") return outcome;
+    if (outcome === "restart") {
+      yield* Ref.set(picked, { ...from, positionSec: 0 });
+      return outcome;
+    }
+    const tried = (outcome === "ok" ? pool : first) === "w" ? options.wrapped : options.forward;
+    const chosen = outcome === "ok" ? tried[Number(first)] : undefined;
+    const skipped =
+      chosen !== undefined ? tried.slice(0, Number(first)) : outcome === "exhausted" ? tried : [];
+    for (const entry of skipped) unavailableKeys.add(MusicQueue.entryKey(entry.value));
+    const index = Number(second);
+    if (chosen === undefined || !Number.isInteger(index)) {
+      // Ended, nothing left to play, or Music took over: the queue stays resumable here.
+      yield* setPicked(null);
+      return outcome;
+    }
+    const key = MusicQueue.entryKey(chosen.value);
+    unavailableKeys.delete(key);
+    yield* Ref.set(
+      picked,
+      pickSong(
+        chosen.song.playlistId,
+        chosen.song.trackId,
+        index,
+        yield* Clock.currentTimeMillis,
+        from.seed,
+      ),
+    );
+    yield* commit(
+      {
+        ...current,
+        explicit: MusicQueue.moveCursor(explicit, chosen.at),
+        currentKey: key,
+        trackId: chosen.song.trackId,
+        positionSec: 0,
+        display: entryDisplay(current.display, chosen.song),
+      },
+      "position",
+    );
+    yield* tryHandoff;
+    return outcome;
+  });
+
   const stepPicked = Effect.fn("MusicPlayer.stepPickedSong")(function* (
     from: PickedSong,
     direction: "next" | "previous" | "advance",
@@ -1111,7 +1795,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
           : outcome === "hold"
             ? from
             : null;
-    yield* Ref.set(picked, next);
+    yield* setPicked(next);
     return outcome;
   });
 
@@ -1125,14 +1809,25 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
         const decision = followPickedSong(current, state, yield* Clock.currentTimeMillis);
         switch (decision._tag) {
           case "follow": {
-            yield* Ref.set(picked, decision.picked);
-            return decision.hide ? null : withPlayingFrom(state, decision.picked);
+            // An edited queue's order is its own; Music's shuffle only toggles it.
+            const next =
+              queue?.active === true && queue.explicit !== null
+                ? { ...decision.picked, shuffle: null }
+                : decision.picked;
+            yield* Ref.set(picked, next);
+            yield* syncQueue;
+            yield* observeQueueSample(state);
+            return decision.hide ? null : withPlayingFrom(state, next);
           }
           case "drop":
-            yield* Ref.set(picked, null);
+            yield* setPicked(null);
             return state;
           case "advance":
-            yield* stepPicked(current, "advance").pipe(Effect.catch(() => Ref.set(picked, null)));
+            yield* (
+              queue?.active === true && queue.explicit !== null
+                ? stepExplicit(current, "advance")
+                : stepPicked(current, "advance")
+            ).pipe(Effect.catch(() => setPicked(null)));
             return null;
         }
       }),
@@ -1271,6 +1966,23 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
           }),
       }),
     ),
+    Effect.tap((result) =>
+      pickLock.withPermits(1)(
+        Effect.suspend(() => {
+          playlistNames = new Map(
+            result.playlists.flatMap((playlist) => {
+              const name = sanitizeDisplay({ sourceName: playlist.name }).sourceName;
+              return name === undefined ? [] : [[playlist.id, name] as const];
+            }),
+          );
+          const current = queue;
+          const source = sourcePlaylistOf(current);
+          return current === null || source === null
+            ? Effect.void
+            : noteSourceName(current.id, source, playlistNames.get(source));
+        }),
+      ),
+    ),
     Effect.withSpan("MusicPlayer.listPlaylists"),
   );
 
@@ -1301,7 +2013,9 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
         },
       );
       // If Music never took the shuffle, say so; turning it on later keeps this order.
-      yield* Ref.set(picked, shuffleFlag === "off" ? { ...pick, shuffled: false } : pick);
+      const next = shuffleFlag === "off" ? { ...pick, shuffled: false } : pick;
+      yield* Ref.set(picked, next);
+      yield* startQueue(next);
       return;
     }
     const shuffle =
@@ -1314,7 +2028,8 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       return yield* new MusicError({ operation: "play-playlist", reason: "not-found" });
     }
     sampleVersion++;
-    yield* Ref.set(picked, null);
+    // Music runs its own queue now; T3's stays resumable.
+    yield* setPicked(null);
   }, pickLock.withPermits(1));
 
   const listTracks = Effect.fn("MusicPlayer.listTracks")(function* (input: MusicListTracksInput) {
@@ -1349,16 +2064,15 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     }
     sampleVersion++;
     const index = Number(result.split(":")[1]);
-    yield* Ref.set(
-      picked,
-      pickSong(
-        input.playlistId,
-        input.trackId,
-        Number.isInteger(index) ? index : input.index,
-        yield* Clock.currentTimeMillis,
-        yield* newSeed,
-      ),
+    const pick = pickSong(
+      input.playlistId,
+      input.trackId,
+      Number.isInteger(index) ? index : input.index,
+      yield* Clock.currentTimeMillis,
+      yield* newSeed,
     );
+    yield* Ref.set(picked, pick);
+    yield* startQueue(pick);
   }, pickLock.withPermits(1));
 
   const readLibrary = Effect.fn("MusicPlayer.readLibrary")(function* () {
@@ -1373,6 +2087,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     if (snapshot === null) {
       return yield* new MusicError({ operation: "search-library", reason: "unavailable" });
     }
+    libraryId = snapshot.playlistId;
     return snapshot;
   });
 
@@ -1490,20 +2205,52 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     if (input._tag === "next" || input._tag === "previous") {
       const current = yield* Ref.get(picked);
       // A playlist that is gone, or music someone else started, leaves Music's own controls.
-      const outcome = current === null ? null : yield* stepPicked(current, input._tag);
-      if (outcome !== null && outcome !== "not-found" && outcome !== "changed") return;
-    }
-    yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
-    if (input._tag === "set-shuffle") {
-      const current = yield* Ref.updateAndGet(picked, (current) =>
+      const outcome =
         current === null
           ? null
-          : {
-              ...current,
-              shuffle: input.enabled ? (current.shuffle ?? { first: current.index }) : null,
-              shuffled: input.enabled,
-            },
-      );
+          : queue?.active === true && queue.explicit !== null
+            ? yield* stepExplicit(current, input._tag)
+            : yield* stepPicked(current, input._tag);
+      if (outcome !== null && outcome !== "not-found" && outcome !== "changed") return;
+    }
+    const explicitShuffle =
+      input._tag === "set-shuffle" && queue?.active === true && queue.explicit !== null;
+    // Off again while a Reset waits for its confirmation only retries the Reset's write.
+    const retryReset =
+      explicitShuffle &&
+      input._tag === "set-shuffle" &&
+      !input.enabled &&
+      resetAck !== null &&
+      !resetAck.confirmed &&
+      resetAck.revision === queue?.revision;
+    yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
+    if (input._tag === "set-shuffle") {
+      if (explicitShuffle) {
+        if (!retryReset) {
+          // A deliberate shuffle on supersedes a pending Reset.
+          if (input.enabled) resetAck = null;
+          settle = {
+            value: input.enabled,
+            deadline: (yield* Clock.currentTimeMillis) + PICK_SETTLE_MS,
+          };
+          if (musicShuffle !== input.enabled) {
+            musicShuffle = input.enabled;
+            yield* applyToggle(input.enabled);
+          }
+        }
+      } else {
+        yield* Ref.update(picked, (current) =>
+          current === null
+            ? null
+            : {
+                ...current,
+                shuffle: input.enabled ? (current.shuffle ?? { first: current.index }) : null,
+                shuffled: input.enabled,
+              },
+        );
+        yield* syncQueue;
+      }
+      const current = yield* Ref.get(picked);
       // Up Next follows at once rather than at the next sample; the next step reads Music's flag.
       yield* republish((state) => withPlayingFrom({ ...state, shuffle: input.enabled }, current));
     }
@@ -1629,6 +2376,417 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     );
   });
 
+  const queueChanged = () => new MusicError({ operation: "queue", reason: "queue-changed" });
+
+  /** Server-side details for songs a client named by playlist position; null when gone. */
+  const readSongs = Effect.fn("MusicPlayer.readQueueSongs")(function* (
+    refs: ReadonlyArray<MusicSongRef>,
+    sourcePlaylistId: string | null,
+  ) {
+    const result = yield* runScript(
+      "queue",
+      "JavaScript",
+      SONG_INFO_SCRIPT,
+      [songRefsArgument(refs), sourcePlaylistId ?? "none"],
+      MAX_QUEUE_OUTPUT_BYTES,
+    );
+    const raw = Option.getOrNull(decodeRawSongInfo(result));
+    if (raw === null || raw.songs.length !== refs.length) {
+      return yield* new MusicError({ operation: "queue", reason: "unavailable" });
+    }
+    const songs = refs.map((ref, i): MusicQueue.QueueSong | null => {
+      const info = raw.songs[i];
+      if (info === null || info === undefined || persistentId(info.id) !== ref.trackId) return null;
+      if (!Number.isInteger(info.index) || info.index < 0) return null;
+      return {
+        playlistId: ref.playlistId,
+        trackId: ref.trackId,
+        index: info.index,
+        meta: {
+          name: text(info.name),
+          artist: text(info.artist),
+          durationSec: seconds(info.durationSec),
+        },
+      };
+    });
+    return { songs, playlistName: raw.playlistName, wraps: raw.wraps };
+  });
+
+  /** The whole order STEP_SCRIPT would walk for this pick, checked against the client's read. */
+  const materialise = Effect.fn("MusicPlayer.materialiseQueue")(function* (
+    state: QueueState,
+    pick: PickedSong,
+    sourceCount: number,
+  ) {
+    const result = yield* runScript(
+      "queue",
+      "JavaScript",
+      MATERIALISE_SCRIPT,
+      [
+        pick.playlistId,
+        pick.trackId,
+        String(pick.index),
+        String(pick.seed),
+        shuffleArg(pick.shuffle),
+        pick.shuffled ? "on" : "off",
+        String(MusicQueue.MAX_QUEUE_ENTRIES),
+      ],
+      MAX_QUEUE_OUTPUT_BYTES,
+    );
+    if (result === "too-long") {
+      return yield* new MusicError({ operation: "queue", reason: "queue-too-long" });
+    }
+    const raw = Option.getOrNull(decodeRawMaterialised(result));
+    // A playlist that changed size, or moved the current song, is not the one the client read.
+    if (
+      raw === null ||
+      raw.ids.length !== sourceCount ||
+      raw.current !== pick.index ||
+      raw.sequence.length !== raw.ids.length ||
+      raw.ids.some((id) => persistentId(id) === null)
+    ) {
+      return yield* queueChanged();
+    }
+    const cursor = raw.sequence.indexOf(raw.current);
+    const explicit = MusicQueue.materialise({
+      id: state.id,
+      revision: state.revision,
+      playlistId: pick.playlistId,
+      ids: raw.ids,
+      sequence: raw.sequence,
+      cursor,
+      shuffleSeed: raw.shuffled ? pick.seed : null,
+    });
+    if (!MusicQueue.isConsistent(explicit)) return yield* queueChanged();
+    musicShuffle = raw.shuffled;
+    return explicit;
+  });
+
+  /** Reset turns shuffle off without touching playback; the formula waits for Music to agree. */
+  const afterReset = Effect.fn("MusicPlayer.afterQueueReset")(function* (state: QueueState) {
+    settle = null;
+    const latestState = Option.getOrNull(yield* Ref.get(latest));
+    const shuffleOn = musicShuffle ?? (latestState?._tag === "ready" ? latestState.shuffle : false);
+    const now = yield* Clock.currentTimeMillis;
+    resetAck = {
+      id: state.id,
+      revision: state.revision,
+      confirmed: !shuffleOn,
+      deadline: now + PICK_SETTLE_MS,
+    };
+    if (shuffleOn) {
+      yield* runScript("control", "JavaScript", CONTROL_SCRIPT, ["shuffle-off"]).pipe(
+        Effect.ignore,
+      );
+      sampleVersion++;
+    } else {
+      musicShuffle = false;
+      yield* tryHandoff;
+    }
+  });
+
+  const editQueue = Effect.fn("MusicPlayer.editQueue")(function* (input: MusicEditQueueInput) {
+    const current = queue;
+    const pick = yield* Ref.get(picked);
+    if (
+      current === null ||
+      !current.active ||
+      pick === null ||
+      current.id !== input.queueId ||
+      current.revision !== input.expectedRevision
+    ) {
+      return yield* queueChanged();
+    }
+    let edit: MusicQueue.QueueEdit;
+    if (input.edit._tag === "play-next" || input.edit._tag === "add") {
+      const { songs } = yield* readSongs(input.edit.songs, null);
+      const found = songs.filter((song) => song !== null);
+      if (found.length !== songs.length) {
+        return yield* new MusicError({ operation: "queue", reason: "not-found" });
+      }
+      edit = { _tag: input.edit._tag, songs: found };
+    } else {
+      edit = input.edit;
+    }
+    let explicit = current.explicit;
+    if (explicit === null) {
+      if (input.sourceCount === undefined) return yield* queueChanged();
+      explicit = yield* materialise(current, pick, input.sourceCount);
+    }
+    const result = MusicQueue.applyEdit(explicit, current.revision, edit);
+    if (result._tag === "queue-changed") return yield* queueChanged();
+    if (result._tag === "queue-too-long") {
+      return yield* new MusicError({ operation: "queue", reason: "queue-too-long" });
+    }
+    if (current.explicit === null) yield* Ref.set(picked, { ...pick, shuffle: null });
+    const next: QueueState = {
+      ...current,
+      explicit: result.queue,
+      revision: result.queue.revision,
+      currentKey: MusicQueue.entryKey(MusicQueue.currentValue(result.queue)),
+    };
+    yield* commit(next, "body");
+    if (edit._tag === "reset") yield* afterReset(next);
+    return { id: next.id, revision: next.revision } satisfies MusicQueueRef;
+  }, pickLock.withPermits(1));
+
+  const formulaView = Effect.fn("MusicPlayer.formulaQueueView")(function* (
+    state: QueueState,
+    pick: PickedSong,
+  ) {
+    const result = yield* runScript(
+      "queue",
+      "JavaScript",
+      FORMULA_QUEUE_SCRIPT,
+      [
+        pick.playlistId,
+        pick.trackId,
+        String(pick.index),
+        String(pick.seed),
+        shuffleArg(pick.shuffle),
+        pick.shuffled ? "on" : "off",
+        String(QUEUE_PAGE),
+      ],
+      MAX_QUEUE_OUTPUT_BYTES,
+    );
+    if (result === "not-found") {
+      return yield* new MusicError({ operation: "queue", reason: "not-found" });
+    }
+    const raw = Option.getOrNull(decodeRawFormulaQueue(result));
+    const tracks = raw === null ? [] : playlistTracks(raw.tracks);
+    const [head, ...rest] = tracks;
+    if (raw === null || head === undefined) {
+      return yield* new MusicError({ operation: "queue", reason: "unavailable" });
+    }
+    yield* pickLock.withPermits(1)(
+      noteSourceName(state.id, pick.playlistId, raw.playlistName ?? undefined),
+    );
+    const entry = (track: MusicPlaylistTrack): MusicQueueEntry => ({
+      key: `s${track.index}`,
+      trackId: track.id,
+      name: track.name,
+      artist: track.artist,
+      durationSec: track.durationSec,
+      unavailable: false,
+    });
+    return {
+      id: state.id,
+      revision: state.revision,
+      currentKey: `s${head.index}`,
+      edited: false,
+      sourceName: text(raw.playlistName) || (state.display.sourceName ?? "Playlist"),
+      sourceCount: Math.max(0, Math.floor(raw.count)),
+      current: entry(head),
+      upcoming: rest.map(entry),
+      totalUpcoming: Math.max(0, Math.floor(raw.total)),
+      wraps: raw.wraps,
+      shuffled: raw.shuffled,
+    } satisfies MusicQueueView;
+  });
+
+  const explicitView = Effect.fn("MusicPlayer.explicitQueueView")(function* (
+    state: QueueState,
+    explicit: MusicQueue.ExplicitQueue,
+  ) {
+    const shown = explicit.order
+      .slice(explicit.cursor, explicit.cursor + 1 + QUEUE_PAGE)
+      .map((value) => ({ value, song: MusicQueue.songForValue(explicit, value)! }));
+    const source = explicit.source.kind === "playlist" ? explicit.source.playlistId : null;
+    const read = yield* readSongs(
+      shown.map(({ song }) => ({
+        playlistId: song.playlistId,
+        trackId: song.trackId,
+        index: song.index,
+      })),
+      source,
+    );
+    if (source !== null) {
+      yield* pickLock.withPermits(1)(
+        noteSourceName(state.id, source, read.playlistName ?? undefined),
+      );
+    }
+    const entries = shown.map(({ value, song }, i): MusicQueueEntry => {
+      const key = MusicQueue.entryKey(value);
+      const found = read.songs[i] ?? null;
+      const meta = song.meta ?? found?.meta ?? null;
+      return meta === null
+        ? {
+            key,
+            trackId: song.trackId,
+            name: UNAVAILABLE_SONG,
+            artist: "",
+            durationSec: 0,
+            unavailable: true,
+          }
+        : {
+            key,
+            trackId: song.trackId,
+            name: meta.name,
+            artist: meta.artist,
+            durationSec: meta.durationSec,
+            unavailable: found === null || unavailableKeys.has(key),
+          };
+    });
+    const label =
+      explicit.source.kind === "favourites"
+        ? "Favourites"
+        : explicit.source.kind === "recent"
+          ? "Recently played"
+          : text(read.playlistName) || (state.display.sourceName ?? "Playlist");
+    return {
+      id: state.id,
+      revision: state.revision,
+      currentKey: state.currentKey,
+      edited: true,
+      sourceName: label,
+      current: entries[0] ?? null,
+      upcoming: entries.slice(1),
+      totalUpcoming: explicit.order.length - explicit.cursor - 1,
+      wraps: read.wraps,
+      shuffled: explicit.shuffle !== null,
+    } satisfies MusicQueueView;
+  });
+
+  const getQueue = Effect.fn("MusicPlayer.getQueue")(function* (input: MusicGetQueueInput) {
+    // Read outside the pick lock, so a slow Music never holds up a step; a change since the
+    // snapshot publishes a new revision or key and the client reads again.
+    const [state, pick] = yield* pickLock.withPermits(1)(
+      Effect.all([Effect.sync(() => queue), Ref.get(picked)]),
+    );
+    if (state === null || !state.active || pick === null || state.id !== input.queueId) {
+      return yield* queueChanged();
+    }
+    return state.explicit === null
+      ? yield* formulaView(state, pick)
+      : yield* explicitView(state, state.explicit);
+  });
+
+  /** Plays the saved entry where it was. Used by Resume and by replacement Undo. */
+  const resumeSaved = Effect.fn("MusicPlayer.resumeSaved")(function* (state: QueueState) {
+    const formula = state.formula;
+    const song =
+      state.explicit !== null
+        ? MusicQueue.songForKey(state.explicit, state.currentKey)
+        : formula === null
+          ? null
+          : {
+              playlistId: formula.playlistId,
+              trackId: state.trackId,
+              index: Number(state.currentKey.slice(1)),
+              meta: null,
+            };
+    if (song === null) return yield* queueChanged();
+    // The saved index first, then the song by id if the playlist moved it; never another song.
+    const result = yield* runScript("queue", "JavaScript", PLAY_TRACK_SCRIPT, [
+      song.playlistId,
+      song.trackId,
+      String(song.index),
+    ]);
+    if (result === "not-found") {
+      yield* commit({ ...state, sourceMissing: true }, "none");
+      return yield* new MusicError({ operation: "queue", reason: "not-found" });
+    }
+    sampleVersion++;
+    const played = Number(result.split(":")[1]);
+    const index = Number.isInteger(played) ? played : song.index;
+    const now = yield* Clock.currentTimeMillis;
+    const pick =
+      state.explicit === null && formula !== null
+        ? {
+            ...pickSong(
+              song.playlistId,
+              song.trackId,
+              index,
+              now,
+              formula.seed,
+              formulaShuffle(formula),
+            ),
+            shuffled: formula.shuffled,
+          }
+        : pickSong(song.playlistId, song.trackId, index, now, yield* newSeed);
+    forgetPending();
+    unavailableKeys = new Set();
+    const durationSec = song.meta?.durationSec ?? 0;
+    const seek =
+      state.positionSec > RESUME_MIN_SECONDS &&
+      (durationSec === 0 || state.positionSec < durationSec - RESUME_TAIL_SECONDS);
+    if (seek) {
+      yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [
+        "seek",
+        String(state.positionSec),
+      ]).pipe(Effect.ignore);
+      yield* Ref.set(seekSinceSample, { positionSec: state.positionSec, atMs: now });
+    }
+    yield* Ref.set(picked, seek ? { ...pick, positionSec: state.positionSec } : pick);
+    yield* commit(
+      {
+        ...state,
+        active: true,
+        sourceMissing: false,
+        currentKey: state.explicit === null ? `s${index}` : state.currentKey,
+        positionSec: seek ? state.positionSec : 0,
+      },
+      "position",
+    );
+  });
+
+  const savedQueue = (input: MusicSavedQueueInput) =>
+    Effect.suspend(() => {
+      const current = queue;
+      return current === null ||
+        current.active ||
+        current.id !== input.queueId ||
+        current.revision !== input.revision
+        ? Effect.fail(queueChanged())
+        : Effect.succeed(current);
+    });
+
+  const resumeQueue = Effect.fn("MusicPlayer.resumeQueue")(function* (input: MusicSavedQueueInput) {
+    yield* resumeSaved(yield* savedQueue(input));
+  }, pickLock.withPermits(1));
+
+  const dismissSavedQueue = Effect.fn("MusicPlayer.dismissSavedQueue")(function* (
+    input: MusicSavedQueueInput,
+  ) {
+    yield* savedQueue(input);
+    queue = null;
+    yield* store.clear;
+    yield* publishQueue;
+  }, pickLock.withPermits(1));
+
+  const undoReplace = Effect.fn("MusicPlayer.undoReplace")(function* (
+    input: MusicUndoReplaceInput,
+  ) {
+    const hold = replaced;
+    if (
+      hold === null ||
+      hold.info.replacedId !== input.replacedId ||
+      hold.info.replacedRevision !== input.replacedRevision ||
+      hold.info.byId !== input.byId ||
+      hold.info.byRevision !== input.byRevision
+    ) {
+      return yield* queueChanged();
+    }
+    const current = queue;
+    const now = yield* Clock.currentTimeMillis;
+    yield* clearReplaced;
+    if (
+      now >= hold.info.expiresAt ||
+      current === null ||
+      !current.active ||
+      current.id !== hold.info.byId ||
+      current.revision !== hold.info.byRevision
+    ) {
+      yield* publishQueue;
+      return yield* queueChanged();
+    }
+    // The held body and position land in one writer turn, never the replacement's position.
+    forgetPending();
+    yield* commit(hold.held, "body");
+    yield* resumeSaved(hold.held);
+    return { id: hold.held.id, revision: hold.held.revision } satisfies MusicQueueRef;
+  }, pickLock.withPermits(1));
+
   return MusicPlayer.of({
     stateStream,
     listPlaylists,
@@ -1659,14 +2817,14 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       ? listening.clearHistory
       : Effect.fail(new MusicError({ operation: "import-history", reason: "unsupported" })),
     observeAgents,
-    // Stage 0 freeze: the queue, favourites and recent services land in later stages.
-    queueStream: Stream.never,
-    getQueue: notYet("queue"),
-    editQueue: notYet("queue"),
-    undoReplace: notYet("queue"),
+    queueStream: SubscriptionRef.changes(queueStatus),
+    getQueue,
+    editQueue,
+    undoReplace,
+    resumeQueue,
+    dismissSavedQueue,
+    // Stage 3: playing from Favourites and Recently played, and those lists.
     playList: notYet("queue"),
-    resumeQueue: notYet("queue"),
-    dismissSavedQueue: notYet("queue"),
     listFavorites: notYet("favorites"),
     setTrackFavorited: notYet("favorites"),
     listRecent: notYet("recent"),

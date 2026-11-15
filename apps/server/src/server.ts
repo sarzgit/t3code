@@ -89,6 +89,7 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as MusicAgentWatch from "./music/MusicAgentWatch.ts";
 import * as MusicListeningStats from "./music/MusicListeningStats.ts";
+import * as MusicQueueStore from "./music/MusicQueueStore.ts";
 import * as MusicLibrarySync from "./music/MusicLibrarySync.ts";
 import * as MusicPlayer from "./music/MusicPlayer.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -517,6 +518,7 @@ const layerDevice = DeviceService.layer.pipe(
 const layerMusic = Layer.mergeAll(MusicPlayer.layer, MusicLibrarySync.layer).pipe(
   Layer.provide(ProcessRunner.layer),
   Layer.provide(MusicListeningStats.layer),
+  Layer.provide(MusicQueueStore.layer),
 );
 
 const layerWorkspaceEntries = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));
