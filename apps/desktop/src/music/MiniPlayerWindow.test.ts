@@ -208,3 +208,43 @@ it.effect("saves pin and position, and restores the saved position", () =>
     }).pipe(Effect.provide(layer));
   }),
 );
+
+it.effect("closes on Cmd+W or Escape only, leaving other chords to the renderer", () =>
+  Effect.gen(function* () {
+    const { created, layer } = yield* setup;
+    yield* Effect.gen(function* () {
+      const player = yield* MiniPlayerWindow.MusicMiniPlayerWindow;
+      const press = (input: Partial<Electron.Input>) => {
+        const event = { prevented: false, preventDefault: () => (event.prevented = true) };
+        created.at(-1)!.window.emitContents("before-input-event", event, {
+          type: "keyDown",
+          key: "",
+          meta: false,
+          control: false,
+          alt: false,
+          shift: false,
+          ...input,
+        });
+        return event.prevented;
+      };
+      yield* player.open({ focus: true });
+      const ignored = [
+        press({ key: "w" }),
+        press({ key: "w", control: true }),
+        press({ key: "W", meta: true, shift: true }),
+        press({ key: "w", meta: true, alt: true }),
+        press({ key: "Escape", meta: true }),
+        press({ key: "w", meta: true, type: "keyUp" }),
+      ];
+      assert.deepEqual(ignored, [false, false, false, false, false, false]);
+      assert.notInclude(created[0]!.window.calls, "close");
+
+      assert.isTrue(press({ key: "W", meta: true }));
+      assert.include(created[0]!.window.calls, "close");
+
+      yield* player.open({ focus: true });
+      assert.isTrue(press({ key: "Escape" }));
+      assert.include(created[1]!.window.calls, "close");
+    }).pipe(Effect.provide(layer));
+  }),
+);
