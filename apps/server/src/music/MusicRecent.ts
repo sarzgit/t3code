@@ -155,7 +155,9 @@ const make = Effect.fn("MusicRecent.make")(function* <E>(file: {
   const clear = lock
     .withPermits(1)(
       Effect.gen(function* () {
-        if (!file.isReadOnly()) yield* file.replace(emptyRecentFile());
+        // A file this run must not write keeps its rows; claiming a Clear would bring them back.
+        if (file.isReadOnly()) return yield* Effect.fail("read-only" as const);
+        yield* file.replace(emptyRecentFile());
         songs = [];
         dirty = false;
       }),

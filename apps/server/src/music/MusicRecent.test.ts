@@ -158,6 +158,27 @@ describe("MusicRecent store", () => {
         Effect.flatMap(Recent.MusicRecent, (s) => s.list),
       );
       assert.deepStrictEqual(reopened, [row(OTHER, 3)]);
+
+      // A file this run can't read can't be cleared: Clear says so and keeps what it shows.
+      const path = yield* withStore(baseDir, recentPath);
+      yield* fileSystem.chmod(path, 0o000);
+      const refused = yield* withStore(
+        baseDir,
+        Effect.gen(function* () {
+          const store = yield* Recent.MusicRecent;
+          yield* store.record(row(SONG, 4));
+          const error = yield* Effect.flip(store.clear);
+          return { reason: error.reason, list: yield* store.list };
+        }),
+      );
+      yield* fileSystem.chmod(path, 0o600);
+      assert.deepStrictEqual(refused, { reason: "unavailable", list: [row(SONG, 4)] });
+      assert.deepStrictEqual(
+        JSON.parse(yield* fileSystem.readFileString(path)).songs.map(
+          (song: Recent.RecentSong) => song.trackId,
+        ),
+        [OTHER],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
