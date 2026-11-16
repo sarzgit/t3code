@@ -87,10 +87,6 @@ const QueuePositionFile = Schema.Struct({
   positionSec: Schema.Number,
   savedAt: Schema.Number,
   display: Schema.optionalKey(Schema.Unknown),
-  /** Whether T3 still played this queue when the checkpoint was written; absent in older files. */
-  active: Schema.optionalKey(Schema.Boolean),
-  /** Only the last checkpoint of a server that shut down cleanly; never on a running one's. */
-  closed: Schema.optionalKey(Schema.Boolean),
 });
 export type QueuePosition = typeof QueuePositionFile.Type;
 
@@ -157,11 +153,6 @@ export interface SavedEntry {
   readonly positionSec: number;
   readonly display: QueueDisplay;
   readonly explicit: MusicQueue.ExplicitQueue | null;
-  /**
-   * The accepted checkpoint is a clean shutdown's, written while T3 still played the queue. A
-   * crash, or a write that failed, leaves an earlier checkpoint, so the queue stays a Resume card.
-   */
-  readonly wasActive: boolean;
 }
 
 /**
@@ -181,7 +172,6 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
             positionSec: 0,
             display: sanitizeDisplay(body.display),
             explicit,
-            wasActive: false,
           };
     }
     return body.currentKey.startsWith("s")
@@ -191,7 +181,6 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
           positionSec: 0,
           display: sanitizeDisplay(body.display),
           explicit: null,
-          wasActive: false,
         }
       : null;
   };
@@ -202,7 +191,6 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
   }
   const positionSec = Number.isFinite(position.positionSec) ? Math.max(0, position.positionSec) : 0;
   const display = sanitizeDisplay(position.display);
-  const wasActive = position.active === true && position.closed === true;
   if (body.formula !== undefined) {
     return position.currentKey.startsWith("s")
       ? {
@@ -211,7 +199,6 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
           trackId: position.trackId,
           positionSec,
           display,
-          wasActive,
         }
       : base;
   }
@@ -224,7 +211,6 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
         positionSec,
         display,
         explicit,
-        wasActive,
       };
 }
 
@@ -341,7 +327,7 @@ export const layer = Layer.effect(
 
 /**
  * Keeps the files in memory, for tests and hosts that never persist. Tests may pass `files` to
- * read what a closed layer left behind, and `failWrites` to make writes fail.
+ * read what a closed layer left behind.
  */
 export const layerMemory = (
   initial: {
@@ -350,7 +336,6 @@ export const layerMemory = (
   } = {},
   options: {
     readonly files?: { body: QueueBody | null; position: QueuePosition | null };
-    readonly failWrites?: () => boolean;
   } = {},
 ) =>
   Layer.effect(
@@ -360,12 +345,10 @@ export const layerMemory = (
       files.body = initial.body ?? null;
       files.position = initial.position ?? null;
       const writer = yield* makeWriter(files.body, (pending) =>
-        options.failWrites?.() === true
-          ? Effect.fail("write failed" as const)
-          : Effect.sync(() => {
-              if (pending.body !== undefined) files.body = pending.body;
-              if (pending.position !== undefined) files.position = pending.position;
-            }),
+        Effect.sync(() => {
+          if (pending.body !== undefined) files.body = pending.body;
+          if (pending.position !== undefined) files.position = pending.position;
+        }),
       );
       return MusicQueueStore.of({ load: Effect.sync(() => ({ ...files })), ...writer });
     }),

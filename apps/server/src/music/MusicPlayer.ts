@@ -325,14 +325,6 @@ const PLAY_TRACK_SCRIPT = `function run(argv) {
   return "ok:" + target;
 }${SONGS_JXA}`;
 
-// Read-only: how many times a song sits in a playlist.
-const COPIES_SCRIPT = `function run(argv) {
-  const Music = Application("Music");
-  const found = Music.playlists.whose({ persistentID: argv[0] })();
-  if (found.length === 0) return "0";
-  return String(songs(Music, found[0]).ids.filter((id) => id === argv[1]).length);
-}${SONGS_JXA}`;
-
 // Reads the whole library once; the server filters it, so a query never reaches a script.
 const LIBRARY_SCRIPT = `function run() {
   const Music = Application("Music");
@@ -828,9 +820,6 @@ const REPLACED_HOLD = Duration.seconds(30);
 /** Resume seeks only past this, and not into the last RESUME_TAIL_SECONDS. */
 const RESUME_MIN_SECONDS = 5;
 const RESUME_TAIL_SECONDS = 10;
-/** How far a playing song may have moved on since its last checkpoint and still be T3's. */
-const ADOPT_PLAYING_DRIFT_SECONDS = QUEUE_CHECKPOINT_MS / 1000 + 75;
-const ADOPT_PAUSED_DRIFT_SECONDS = 1.5;
 const UNAVAILABLE_SONG = "Unavailable song";
 
 const text = (value: string | null | undefined) => (value ?? "").slice(0, MAX_TEXT);
@@ -1431,11 +1420,6 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   let replaced: { readonly info: MusicReplacedQueue; readonly held: QueueState } | null = null;
   let lastCheckpointAt = 0;
   let lastPlayback: string | null = null;
-  /**
-   * The queue read from files at startup, until the first sample with a song decides whether
-   * Music still holds it where T3 left it (a restart mid-song, often during a long pause).
-   */
-  let restored: { readonly id: string; readonly revision: number } | null = null;
   /** The last normal playlist list, for labels only; never fetched just for a label. */
   let playlistNames: ReadonlyMap<string, string> = new Map();
   let libraryId: string | null = null;
@@ -1497,8 +1481,6 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
         display: saved.display,
         sourceMissing: false,
       };
-      // Only a queue T3 never let go of may be taken back; T3 letting go writes active false.
-      if (saved.wasActive) restored = { id: body.id, revision: body.revision };
     }
   }
 
@@ -1556,21 +1538,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     positionSec: state.positionSec,
     savedAt,
     display: state.display,
-    active: state.active,
   });
-
-  // Only a clean shutdown marks its last checkpoint closed, and only that one may be taken back
-  // after a restart: a crash or a failed write leaves an earlier one, so the queue stays a Resume
-  // card whatever Music did meanwhile.
-  yield* Effect.addFinalizer(() =>
-    Effect.gen(function* () {
-      const current = queue;
-      if (current === null) return;
-      const savedAt = yield* Clock.currentTimeMillis;
-      yield* store.savePosition({ ...positionOf(current, savedAt), closed: true });
-      yield* store.settled;
-    }),
-  );
 
   const clearReplaced = Effect.suspend(() => {
     replaced = null;
@@ -1970,7 +1938,6 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     pickLock.withPermits(1)(
       Effect.gen(function* () {
         if (version !== sampleVersion) return null;
-        if (restored !== null && (yield* Ref.get(picked)) === null) yield* adoptRestored(state);
         const current = yield* Ref.get(picked);
         if (current === null) return state;
         const decision = followPickedSong(current, state, yield* Clock.currentTimeMillis);
@@ -2904,69 +2871,8 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
         );
   };
 
-  /**
-   * After a clean restart, a queue T3 still played when the server stopped becomes T3's again without
-   * touching Music, but only when the first sample naming a playlist shows that exact entry, once
-   * in the queue, from the same playlist, where the last checkpoint left it. Anything else stays
-   * a Resume card: the song may be Music's own now.
-   */
-  const adoptRestored = Effect.fn("MusicPlayer.adoptRestored")(function* (state: MusicPlayerState) {
-    const current = queue;
-    const mark = restored;
-    if (mark === null || current === null) return;
-    if (current.active || current.id !== mark.id || current.revision !== mark.revision) {
-      restored = null;
-      return;
-    }
-    if (state._tag !== "ready" || state.playback === "stopped" || state.track === null) return;
-    // Music can briefly fail to name its playlist; wait for a sample that does.
-    if (state.playlistId === null) return;
-    restored = null;
-    const track = state.track;
-    const song = savedSong(current);
-    if (song === null || track.id !== current.trackId || state.playlistId !== song.playlistId) {
-      return;
-    }
-    // A song twice in the queue or in its playlist now: Music's position can't say which copy
-    // is playing, so nothing short of exactly one of each is taken back. The count only reads.
-    const explicit = current.explicit;
-    if (
-      explicit !== null &&
-      explicit.order.filter(
-        (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
-      ).length !== 1
-    ) {
-      return;
-    }
-    const copies = yield* runScript("queue", "JavaScript", COPIES_SCRIPT, [
-      song.playlistId,
-      track.id,
-    ]).pipe(Effect.orElseSucceed(() => "0"));
-    if (copies !== "1") return;
-    const drift = state.positionSec - current.positionSec;
-    const holds =
-      state.playback === "paused"
-        ? Math.abs(drift) <= ADOPT_PAUSED_DRIFT_SECONDS
-        : drift >= -ADOPT_PAUSED_DRIFT_SECONDS && drift <= ADOPT_PLAYING_DRIFT_SECONDS;
-    if (!holds) return;
-    const now = yield* Clock.currentTimeMillis;
-    const pick = yield* savedPick(current, song, song.index, now);
-    yield* Ref.set(picked, {
-      ...pick,
-      seen: true,
-      musicPlaylistId: state.playlistId,
-      positionSec: state.positionSec,
-      durationSec: track.durationSec,
-    });
-    forgetPending();
-    unavailableKeys = new Set();
-    lastPlayback = state.playback;
-    yield* commit({ ...current, active: true, positionSec: state.positionSec }, "position");
-  });
-
   /** Plays the saved entry where it was. Used by Resume and by replacement Undo. */
   const resumeSaved = Effect.fn("MusicPlayer.resumeSaved")(function* (state: QueueState) {
-    restored = null;
     const song = savedSong(state);
     if (song === null) return yield* queueChanged();
     // The saved index first, then the song by id if the playlist moved it; never another song.
