@@ -86,7 +86,11 @@ substantial disk space before pruning.
 Never run a development server against the live `~/.t3/userdata`.
 `--home-dir` does not move the dev desktop's Chromium profile, which every dev desktop on the
 machine shares. Set `T3CODE_DESKTOP_USER_DATA_DIR` to an absolute path to give one run its own
-profile and single-instance lock. Packaged builds refuse it.
+profile and single-instance lock. A packaged build accepts it only as a separate task profile:
+outside `~/Library/Application Support` (or the platform's equivalent) and `~/.t3`, with its own
+`T3CODE_HOME` that neither contains nor sits inside the profile. That run uses Chromium's mock
+keychain so it never touches the installed app's Keychain item. It still shares the app's bundle
+id and URL scheme, so don't open `t3code://` links while it runs beside the installed app.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
 
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
