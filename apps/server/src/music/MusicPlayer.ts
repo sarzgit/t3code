@@ -1484,7 +1484,8 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
         display: saved.display,
         sourceMissing: false,
       };
-      restored = { id: body.id, revision: body.revision };
+      // Only a queue T3 never let go of may be taken back; T3 letting go writes active false.
+      if (saved.wasActive) restored = { id: body.id, revision: body.revision };
     }
   }
 
@@ -1542,6 +1543,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     positionSec: state.positionSec,
     savedAt,
     display: state.display,
+    active: state.active,
   });
 
   const clearReplaced = Effect.suspend(() => {
@@ -2877,9 +2879,10 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   };
 
   /**
-   * After a restart, the restored queue becomes T3's again without touching Music, but only when
-   * the first sample with a song shows that exact entry, from the same playlist, where the last
-   * checkpoint left it. Anything else stays a Resume card: the song may be Music's own now.
+   * After a restart, a queue T3 still played when the server stopped becomes T3's again without
+   * touching Music, but only when the first sample naming a playlist shows that exact entry, once
+   * in the queue, from the same playlist, where the last checkpoint left it. Anything else stays
+   * a Resume card: the song may be Music's own now.
    */
   const adoptRestored = Effect.fn("MusicPlayer.adoptRestored")(function* (state: MusicPlayerState) {
     const current = queue;
@@ -2890,10 +2893,22 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       return;
     }
     if (state._tag !== "ready" || state.playback === "stopped" || state.track === null) return;
+    // Music can briefly fail to name its playlist; wait for a sample that does.
+    if (state.playlistId === null) return;
     restored = null;
     const track = state.track;
     const song = savedSong(current);
     if (song === null || track.id !== current.trackId || state.playlistId !== song.playlistId) {
+      return;
+    }
+    // A song queued twice: Music's position can't say which copy is playing.
+    const explicit = current.explicit;
+    if (
+      explicit !== null &&
+      explicit.order.filter(
+        (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
+      ).length > 1
+    ) {
       return;
     }
     const drift = state.positionSec - current.positionSec;

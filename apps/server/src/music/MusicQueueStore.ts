@@ -87,6 +87,8 @@ const QueuePositionFile = Schema.Struct({
   positionSec: Schema.Number,
   savedAt: Schema.Number,
   display: Schema.optionalKey(Schema.Unknown),
+  /** Whether T3 still played this queue when the checkpoint was written; absent in older files. */
+  active: Schema.optionalKey(Schema.Boolean),
 });
 export type QueuePosition = typeof QueuePositionFile.Type;
 
@@ -153,6 +155,8 @@ export interface SavedEntry {
   readonly positionSec: number;
   readonly display: QueueDisplay;
   readonly explicit: MusicQueue.ExplicitQueue | null;
+  /** The accepted checkpoint says T3 was still playing it: the server stopped, T3 never let go. */
+  readonly wasActive: boolean;
 }
 
 /**
@@ -172,6 +176,7 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
             positionSec: 0,
             display: sanitizeDisplay(body.display),
             explicit,
+            wasActive: false,
           };
     }
     return body.currentKey.startsWith("s")
@@ -181,6 +186,7 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
           positionSec: 0,
           display: sanitizeDisplay(body.display),
           explicit: null,
+          wasActive: false,
         }
       : null;
   };
@@ -191,6 +197,7 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
   }
   const positionSec = Number.isFinite(position.positionSec) ? Math.max(0, position.positionSec) : 0;
   const display = sanitizeDisplay(position.display);
+  const wasActive = position.active === true;
   if (body.formula !== undefined) {
     return position.currentKey.startsWith("s")
       ? {
@@ -199,6 +206,7 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
           trackId: position.trackId,
           positionSec,
           display,
+          wasActive,
         }
       : base;
   }
@@ -211,6 +219,7 @@ export function resolveSaved(body: QueueBody, position: QueuePosition | null): S
         positionSec,
         display,
         explicit,
+        wasActive,
       };
 }
 
