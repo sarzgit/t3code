@@ -1781,6 +1781,60 @@ describe("MusicPlayer queue", () => {
     }),
   );
 
+  it.effect("keeps T3's queue through a long pause, a watcher restart and a reconnect", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(4);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const first = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 });
+        const active = (yield* until(statuses, (status) => status.active !== null)).active!;
+        const song = { id: songs[1]!.id, duration: 200 };
+        const ready =
+          (playback: string, playlistId: string | null = PLAYLIST_ID) =>
+          (state: MusicPlayerState) =>
+            state._tag === "ready" &&
+            state.playback === playback &&
+            state.playlistId === playlistId;
+        session.emit(playingSample(songs[1]!.id, { position: 30 }));
+        yield* until(first.received, ready("playing"));
+        yield* TestClock.adjust("6 seconds");
+        session.emit(sampleLine({ state: "paused", position: 40, track: song }));
+        yield* until(first.received, ready("paused"));
+        yield* TestClock.adjust("3 hours");
+        // Music can briefly fail to name its current playlist; that is not another playlist.
+        session.emit(sampleLine({ state: "paused", position: 40, track: song, playlistId: null }));
+        yield* until(first.received, ready("paused", null));
+        // The watcher dies (sleep, a stuck Music) and comes back on its own.
+        yield* session.exit(output());
+        yield* TestClock.adjust("5 seconds");
+        const restarted = yield* Queue.take(sessions);
+        restarted.emit(sampleLine({ state: "paused", position: 40, track: song }));
+        // Every client goes away and a new one connects.
+        yield* Fiber.interrupt(first.fiber);
+        const second = yield* subscribe(player);
+        const reconnected = yield* Queue.take(sessions);
+        reconnected.emit(sampleLine({ state: "playing", position: 41, track: song }));
+        const resumed = yield* until(
+          second.received,
+          (state) => state._tag === "ready" && state.playback === "playing",
+        );
+        assert.deepStrictEqual(resumed._tag === "ready" ? resumed.playingFrom : null, {
+          playlistId: PLAYLIST_ID,
+          index: 1,
+        });
+        const now = yield* Queue.take(yield* subscribeQueue(player));
+        assert.deepStrictEqual(now.active, active);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect("takes a restored queue back only when Music still holds its song where it was", () =>
     Effect.gen(function* () {
       const { songs, fake, files } = yield* savedEditedQueue();
