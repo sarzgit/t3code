@@ -245,6 +245,20 @@ function startThreadOverlayRetention(router: AppRouter): void {
 }
 
 /**
+ * The music mini-player window runs only what it renders: appearance, language and theme.
+ * Thread, preview, notification and SSH services stay in the main window.
+ */
+export function startMusicMiniPlayerServices(): AppRouter {
+  const router = getRouter(createHashHistory());
+  syncDocumentElectronPlatformClasses(navigator.platform);
+  startClientAppearance();
+  startI18n();
+  startEnvironmentThemeRepaint();
+  startBrowserChromeThemeSync(router);
+  return router;
+}
+
+/**
  * Starts every app-lifetime service once, before the first render, and returns the router.
  * They run for the life of the page, so their disposers are dropped here.
  */

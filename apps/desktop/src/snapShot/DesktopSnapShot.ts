@@ -40,6 +40,7 @@ import * as Electron from "electron";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import { startGlobalShiftShortcutProcess } from "./GlobalShiftShortcutProcess.ts";
 import { startMacModifierPairShortcutProcess } from "./MacModifierPairShortcutProcess.ts";
@@ -457,6 +458,7 @@ async function captureSource({
   regionSnapShotPool,
   prepareReveal,
   onLinuxFeedback,
+  destinationWindow,
 }: {
   mode: DesktopSnapShotState["mode"];
   captureId: string;
@@ -472,14 +474,12 @@ async function captureSource({
   regionSnapShotPool: RegionSnapShotPool;
   prepareReveal: () => Promise<void>;
   onLinuxFeedback: (feedback: LinuxCaptureFeedback) => void;
+  destinationWindow: Electron.BrowserWindow | undefined;
 }) {
   let active: ActiveWindow | undefined;
   let linuxWindow: LinuxWindowMetadata | undefined;
   let linuxFeedback: LinuxCaptureFeedback | undefined;
   let linuxActivationFailure: { readonly cause: unknown } | undefined;
-  const destinationWindow =
-    Electron.BrowserWindow.getFocusedWindow() ??
-    Electron.BrowserWindow.getAllWindows().find((window) => !window.isDestroyed());
   const destinationWindowBounds = destinationWindow?.getBounds();
   {
     const revealPreparation =
@@ -760,6 +760,9 @@ export const make = Effect.gen(function* () {
   const permissions = yield* MacPermissions.MacPermissions;
   const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
+  const electronWindow = yield* ElectronWindow.ElectronWindow;
+  // Never the mini-player: results and permission helpers belong to the main window.
+  const appWindowOrNull = electronWindow.focusedMainOrFirst.pipe(Effect.map(Option.getOrNull));
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const random = yield* SecureRandom.SecureRandom;
@@ -924,6 +927,7 @@ export const make = Effect.gen(function* () {
       transition.dispose();
       yield* fileSystem.makeDirectory(captureDirectory, { recursive: true });
       yield* emit({ type: "requested", id: id as DesktopSnapShotId });
+      const destinationWindow = (yield* appWindowOrNull) ?? undefined;
       const snapshot = yield* Effect.tryPromise({
         try: () =>
           captureSource({
@@ -943,6 +947,7 @@ export const make = Effect.gen(function* () {
             onLinuxFeedback: (feedback) => {
               linuxFeedback = { id, feedback };
             },
+            destinationWindow,
           }),
         catch: (cause) => captureFailure(cause, id),
       });
@@ -1371,7 +1376,7 @@ export const make = Effect.gen(function* () {
     includeAccessibility: boolean,
   ) {
     if (environment.platform !== "darwin") return;
-    const owner = Electron.BrowserWindow.getFocusedWindow();
+    const owner = yield* appWindowOrNull;
     yield* Effect.promise(() => requestMacSnapShotPermissions(includeAccessibility));
     if (Electron.systemPreferences.getMediaAccessStatus("screen") !== "granted") {
       yield* permissions.showHelper("screen-recording", owner);
@@ -1476,7 +1481,7 @@ export const make = Effect.gen(function* () {
           action,
           reason: "unsupported-session",
         });
-      const owner = Electron.BrowserWindow.getFocusedWindow();
+      const owner = yield* appWindowOrNull;
       if (action === "allow-accessibility") {
         const granted = Electron.systemPreferences.isTrustedAccessibilityClient(true);
         if (!granted && environment.isPackaged) {

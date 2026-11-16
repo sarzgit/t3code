@@ -71,6 +71,7 @@ import {
   setSnapShotShortcutSuppressed,
 } from "./methods/snapShot.ts";
 import * as PreviewIpc from "./methods/preview.ts";
+import * as MusicMiniPlayerIpc from "./methods/musicMiniPlayer.ts";
 import * as AppActivationIpc from "./methods/appActivation.ts";
 import * as WebLinksIpc from "./methods/webLinks.ts";
 import {
@@ -168,6 +169,11 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(installCliCommand);
   yield* ipc.handle(uninstallCliCommand);
   yield* ipc.handle(addCliCommandToPath);
+  yield* ipc.handle(MusicMiniPlayerIpc.toggleMusicMiniPlayer);
+  yield* ipc.handle(MusicMiniPlayerIpc.getMusicMiniPlayerState);
+  yield* ipc.handle(MusicMiniPlayerIpc.setMusicMiniPlayerPinned);
+  yield* ipc.handle(MusicMiniPlayerIpc.closeMusicMiniPlayer);
+  yield* ipc.handle(MusicMiniPlayerIpc.openMainFromMusicMiniPlayer);
   for (const previewMethod of PreviewIpc.methods) {
     // Explicit types preserve the error/service union of these heterogeneous preview methods.
     yield* ipc.handle<

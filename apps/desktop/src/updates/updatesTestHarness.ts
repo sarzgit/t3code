@@ -123,6 +123,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     main: Effect.succeedNone,
     currentMainOrFirst: Effect.succeedNone,
     focusedMainOrFirst: Effect.succeedNone,
+    musicMiniPlayer: Effect.succeedNone,
+    setMusicMiniPlayer: () => Effect.void,
+    clearMusicMiniPlayer: () => Effect.void,
     setMain: () => Effect.void,
     clearMain: () => Effect.void,
     prepareReveal: () => Effect.succeed(false),
@@ -215,6 +218,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
+          setMusicMiniPlayer: () => Effect.die("unexpected mini-player settings update"),
           setMainWindowBounds: () => Effect.die("unexpected main window bounds update"),
           setServerExposureMode: () => Effect.die("unexpected server exposure update"),
           setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),

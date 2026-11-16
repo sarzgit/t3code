@@ -76,6 +76,7 @@ import {
   PinIcon,
   PinOffIcon,
   ListXIcon,
+  PictureInPicture2Icon,
   PlayIcon,
   PlugIcon,
   SkipBackIcon,
@@ -1448,6 +1449,21 @@ function OpenCommandPaletteDialog(props: {
       icon: <ListXIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         await editMusicQueue(musicEnvironmentId, activeMusicQueue, { _tag: "clear-upcoming" });
+      },
+    });
+  }
+
+  const musicMiniPlayerBridge = window.desktopBridge?.musicMiniPlayer;
+  if (musicEnvironmentId !== null && musicMiniPlayerBridge) {
+    actionItems.push({
+      kind: "action",
+      value: "action:music-toggle-mini-player",
+      searchTerms: ["music", "mini player", "floating", "window", "picture in picture"],
+      title: "Music: Toggle mini-player",
+      icon: <PictureInPicture2Icon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "music.toggleMiniPlayer",
+      run: async () => {
+        await musicMiniPlayerBridge.toggle();
       },
     });
   }

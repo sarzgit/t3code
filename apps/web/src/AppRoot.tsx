@@ -18,3 +18,13 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
     </I18nProvider>
   );
 }
+
+export function MusicMiniPlayerAppRoot({ router }: { readonly router: AppRouter }) {
+  return (
+    <I18nProvider>
+      <AppAtomRegistryProvider>
+        <RouterProvider router={router} />
+      </AppAtomRegistryProvider>
+    </I18nProvider>
+  );
+}

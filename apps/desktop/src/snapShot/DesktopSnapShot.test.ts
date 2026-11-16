@@ -7,6 +7,7 @@ import {
   type DesktopSnapShotEvent,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -424,6 +425,7 @@ vi.mock("electron", () => {
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopSnapShot from "./DesktopSnapShot.ts";
 import * as SnapShotAccessibility from "./SnapShotAccessibility.ts";
@@ -516,6 +518,7 @@ const layerTest = (
             dispatchSnapShotEvent: () => Effect.void,
           } as unknown as DesktopWindow.DesktopWindow["Service"]),
         ),
+        ElectronWindow.layer.pipe(Layer.provide(Layer.succeed(HostProcess.Platform, platform))),
         FileSystem.layerNoop(fileSystemOverrides),
         Path.layer,
         Layer.succeed(
@@ -2150,6 +2153,39 @@ it.effect("waits to apply settings while permissions are pending", () => {
       assert.isTrue(state.shortcutRegistered);
     }),
   ).pipe(Effect.provide(layer));
+});
+
+it.effect("hands permission helpers to the main window while the mini-player is focused", () => {
+  accessibilityTrustedMock.mockReturnValue(true);
+  mediaAccessStatusMock.mockReturnValue("denied");
+  const owners: Array<unknown> = [];
+  return Effect.gen(function* () {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const main = yield* electronWindow.create({});
+    const miniPlayer = yield* electronWindow.create({}, { auxiliary: true });
+    yield* electronWindow.setMain(main);
+    focusedWindowMock.mockReturnValue(miniPlayer);
+    const service = yield* DesktopSnapShot.make;
+    yield* service.requestPermissions(false);
+    yield* service.setup("allow-screen-recording");
+    yield* service.setup("allow-accessibility");
+    assert.deepEqual(owners, [main, main, main]);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.merge(
+        layerTest("darwin"),
+        // Later services win, so this replaces the real helper and records its owner.
+        Layer.succeed(
+          MacPermissions.MacPermissions,
+          MacPermissions.MacPermissions.of({
+            showHelper: (_permission, owner) => Effect.sync(() => void owners.push(owner)),
+          }),
+        ),
+      ),
+    ),
+    Effect.ensuring(Effect.sync(() => focusedWindowMock.mockReset())),
+  );
 });
 
 it.effect.each([false, true])(

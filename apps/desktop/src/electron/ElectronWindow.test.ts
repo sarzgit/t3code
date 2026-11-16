@@ -192,6 +192,11 @@ describe("ElectronWindow", () => {
       getAllWindowsMock.mockReturnValue([auxiliary, ordinary]);
       const current = yield* electronWindow.currentMainOrFirst;
       assert.isTrue(current._tag === "Some" && current.value === ordinary);
+
+      // Menu actions, dialog owners and permission helpers skip a focused mini-player.
+      getFocusedWindowMock.mockReturnValue(auxiliary);
+      const focused = yield* electronWindow.focusedMainOrFirst;
+      assert.isTrue(focused._tag === "Some" && focused.value === ordinary);
     }).pipe(Effect.provide(layerTest)),
   );
 });

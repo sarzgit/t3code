@@ -14,6 +14,7 @@ vi.mock("electron", () => ({
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
+import * as MiniPlayerWindow from "../music/MiniPlayerWindow.ts";
 import * as DesktopApplicationMenu from "./DesktopApplicationMenu.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -124,6 +125,7 @@ const configureMenu = (
         Layer.provideMerge(layerDesktopWindow(selectedAction)),
         Layer.provideMerge(layerDesktopUpdates),
         Layer.provideMerge(layerElectronDialog),
+        Layer.provideMerge(Layer.mock(MiniPlayerWindow.MusicMiniPlayerWindow, {})),
         Layer.provideMerge(layerElectronApp),
         Layer.provideMerge(
           DesktopEnvironment.layer({ ...environmentInput, ...environment }).pipe(

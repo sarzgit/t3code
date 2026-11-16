@@ -180,7 +180,8 @@ async function hydrateClientSettings(): Promise<void> {
   return clientSettingsHydrationPromise;
 }
 
-function refreshClientSettingsFromOtherTab(): void {
+/** Re-reads persisted settings after another window changed them, such as the desktop mini-player. */
+export function refreshClientSettingsFromOtherTab(): void {
   void enqueueClientSettingsPersistence(async () => {
     const persistedSettings = await ensureLocalApi().persistence.getClientSettings();
     if (persistedSettings) {

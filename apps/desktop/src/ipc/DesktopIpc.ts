@@ -5,18 +5,85 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import { isSameOriginRendererNavigation } from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "./channels.ts";
 
 export interface DesktopIpcInvokeEvent {
   readonly sender: { readonly id: number };
   readonly senderFrame?: unknown;
 }
 
+/**
+ * Everything the music mini-player renderer may call. It boots the same web app as the main
+ * window, so each entry is a read the app needs to boot, authenticate and connect to the primary
+ * environment, or one of the mini-player's own window controls. Everything else, including every
+ * file, shell, dialog, navigation, permission and settings-write channel, stays main-window only.
+ */
+const MUSIC_MINI_PLAYER_IPC_CHANNELS: ReadonlySet<string> = new Set([
+  // Primary environment HTTP/WebSocket URLs and the bootstrap credential the auth gate exchanges.
+  IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL,
+  // Bearer token for the primary environment's WebSocket, which carries Music state and keybindings.
+  IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL,
+  // The root route reads it before choosing a connection; read-only.
+  IpcChannels.GET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL,
+  // musicPlayerEnabled and appearance; the mini-player never writes settings.
+  IpcChannels.GET_CLIENT_SETTINGS_CHANNEL,
+  // Read while shared modules load; static app name and stage.
+  IpcChannels.GET_APP_BRANDING_CHANNEL,
+  // Managed policy telemetry opt-out; an unanswered read would count as enabled.
+  IpcChannels.GET_RELAY_TELEMETRY_ENABLED_CHANNEL,
+  // The shared preload reads it on every document; read-only.
+  IpcChannels.GET_PRIMARY_PASTE_ENABLED_CHANNEL,
+  // The mini-player's own window: pin state, close and "Open in T3".
+  IpcChannels.MUSIC_MINI_PLAYER_GET_STATE_CHANNEL,
+  IpcChannels.MUSIC_MINI_PLAYER_SET_PINNED_CHANNEL,
+  IpcChannels.MUSIC_MINI_PLAYER_CLOSE_CHANNEL,
+  IpcChannels.MUSIC_MINI_PLAYER_OPEN_MAIN_CHANNEL,
+]);
+
+interface IpcSenderWindow {
+  readonly webContents: { readonly id: number; readonly mainFrame: unknown };
+}
+
+const readFrameUrl = (frame: unknown): string | null => {
+  if (typeof frame !== "object" || frame === null || !("url" in frame)) return null;
+  return typeof frame.url === "string" ? frame.url : null;
+};
+
+/** Main window: every channel. Mini-player: its allowlist, from its top frame on the app origin. */
+function isTrustedIpcSender(input: {
+  readonly channel: string;
+  readonly event: DesktopIpcInvokeEvent;
+  readonly main: Option.Option<IpcSenderWindow>;
+  readonly musicMiniPlayer: Option.Option<{
+    readonly window: IpcSenderWindow;
+    readonly applicationUrl: string;
+  }>;
+}): boolean {
+  const { channel, event } = input;
+  const isTopFrameOf = (window: IpcSenderWindow) =>
+    window.webContents.id === event.sender.id && window.webContents.mainFrame === event.senderFrame;
+  if (Option.isSome(input.main) && isTopFrameOf(input.main.value)) return true;
+  if (Option.isNone(input.musicMiniPlayer)) return false;
+  const { window, applicationUrl } = input.musicMiniPlayer.value;
+  const frameUrl = readFrameUrl(event.senderFrame);
+  return (
+    MUSIC_MINI_PLAYER_IPC_CHANNELS.has(channel) &&
+    isTopFrameOf(window) &&
+    frameUrl !== null &&
+    isSameOriginRendererNavigation({ applicationUrl, navigationUrl: frameUrl })
+  );
+}
+
 export interface DesktopIpcSyncEvent extends DesktopIpcInvokeEvent {
   returnValue: unknown;
 }
 
-export type DesktopIpcSenderGuard = (event: DesktopIpcInvokeEvent) => Effect.Effect<boolean>;
+export type DesktopIpcSenderGuard = (
+  event: DesktopIpcInvokeEvent,
+  channel: string,
+) => Effect.Effect<boolean>;
 
 export type DesktopIpcHandleListener = (
   event: DesktopIpcInvokeEvent,
@@ -117,7 +184,7 @@ export const make = (
               runPromise(
                 Effect.gen(function* () {
                   yield* Effect.annotateCurrentSpan({ channel });
-                  if (!(yield* isTrustedSender(event))) {
+                  if (!(yield* isTrustedSender(event, channel))) {
                     return yield* new DesktopIpcUntrustedSenderError({ channel });
                   }
                   return yield* handler(raw, event);
@@ -154,7 +221,7 @@ export const make = (
                 Effect.gen(function* () {
                   yield* Effect.annotateCurrentSpan({ channel });
                   // Throwing here would surface as an uncaught main-process exception.
-                  if (!(yield* isTrustedSender(event))) {
+                  if (!(yield* isTrustedSender(event, channel))) {
                     yield* Effect.logWarning("Rejected sync IPC from an untrusted sender.");
                     return undefined;
                   }
@@ -184,13 +251,11 @@ export const layer = (ipcMain: DesktopIpcMain) =>
     DesktopIpc,
     Effect.gen(function* () {
       const electronWindow = yield* ElectronWindow.ElectronWindow;
-      return make(ipcMain, (event) =>
-        Effect.map(
-          electronWindow.main,
-          (main) =>
-            Option.isSome(main) &&
-            main.value.webContents.id === event.sender.id &&
-            main.value.webContents.mainFrame === event.senderFrame,
+      return make(ipcMain, (event, channel) =>
+        Effect.all([electronWindow.main, electronWindow.musicMiniPlayer]).pipe(
+          Effect.map(([main, musicMiniPlayer]) =>
+            isTrustedIpcSender({ channel, event, main, musicMiniPlayer }),
+          ),
         ),
       );
     }),

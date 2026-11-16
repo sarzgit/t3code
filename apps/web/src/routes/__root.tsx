@@ -49,6 +49,7 @@ import { useUiStateStore } from "../uiStateStore";
 import { configureClientTracing } from "../observability/clientTracing";
 import { resolveInitialServerAuthGateState } from "../environments/primary";
 import { GUEST_PAGE_PATH } from "../guestPage";
+import { MUSIC_MINI_PLAYER_PATH } from "../musicMiniPlayerWindow";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { useHostedPromptLinkLanding } from "../components/promptLinks/HostedPromptLinkLanding";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -94,6 +95,7 @@ export const Route = createRootRoute({
     }
     if (
       authGateState.status === "authenticated" &&
+      location.pathname !== MUSIC_MINI_PLAYER_PATH &&
       getDesktopSnapShotBridge() &&
       shouldResumeSnapShotSetupOnStartup() &&
       location.pathname !== "/settings/snap-shot"
@@ -153,6 +155,9 @@ function RootRouteBranch() {
   );
 
   if (pathname === GUEST_PAGE_PATH) return <Outlet />;
+
+  // Its own window: no sidebar, coordinators, event router or thread keep-alive.
+  if (pathname === MUSIC_MINI_PLAYER_PATH) return <Outlet />;
 
   if (
     pathname === "/pair" ||

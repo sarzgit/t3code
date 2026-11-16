@@ -57,6 +57,7 @@ import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
+import * as MiniPlayerWindow from "./music/MiniPlayerWindow.ts";
 import * as DesktopSnapShot from "./snapShot/DesktopSnapShot.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopPreReadyFileSystem from "./app/DesktopPreReadyFileSystem.ts";
@@ -185,6 +186,10 @@ const layerDesktopSnapShot = DesktopSnapShot.layer.pipe(
   Layer.provideMerge(layerDesktopWindow),
   Layer.provideMerge(layerDesktopFoundation),
 );
+const layerMusicMiniPlayer = MiniPlayerWindow.layer.pipe(
+  Layer.provideMerge(layerDesktopWindow),
+  Layer.provideMerge(layerDesktopFoundation),
+);
 const layerDesktopAppActivation = DesktopAppActivation.layer.pipe(
   Layer.provide(layerDesktopWindow),
 );
@@ -216,6 +221,7 @@ const layerDesktopApplication = Layer.mergeAll(
   DesktopCliCommand.layer,
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),
+  Layer.provideMerge(layerMusicMiniPlayer),
   Layer.provideMerge(
     DesktopUpdates.layer.pipe(
       Layer.provide(DesktopUpdatePolicy.layer),

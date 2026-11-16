@@ -43,6 +43,7 @@ import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
+import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
@@ -250,6 +251,7 @@ function layerTest(input: {
   const layerDesktopAppSettings = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
     get: Effect.sync(() => desktopSettings),
     load: Effect.sync(() => desktopSettings),
+    setMusicMiniPlayer: () => Effect.die("unexpected mini-player settings update"),
     setMainWindowBounds: (bounds, isMaximized) =>
       Effect.gen(function* () {
         if (input.beforeMainWindowBoundsUpdate) {
@@ -296,6 +298,9 @@ function layerTest(input: {
       input.focusedWindow === undefined
         ? Ref.get(input.mainWindow)
         : Effect.succeedSome(input.focusedWindow),
+    musicMiniPlayer: Effect.succeedNone,
+    setMusicMiniPlayer: () => Effect.void,
+    clearMusicMiniPlayer: () => Effect.void,
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
     prepareReveal: () => Effect.succeed(false),
@@ -417,6 +422,9 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
       main: Ref.get(mainWindow),
       currentMainOrFirst,
       focusedMainOrFirst: currentMainOrFirst,
+      musicMiniPlayer: Effect.succeedNone,
+      setMusicMiniPlayer: () => Effect.void,
+      clearMusicMiniPlayer: () => Effect.void,
       setMain: (window) => Ref.set(mainWindow, Option.some(window)),
       clearMain: () => Ref.set(mainWindow, Option.none()),
       prepareReveal: () => Effect.succeed(false),
@@ -513,10 +521,46 @@ describe("DesktopWindow", () => {
     }
   });
 
+  it("restores mini-player bounds on their display and falls back beside the main window", () => {
+    const left = { x: -1920, y: 0, width: 1920, height: 1080 };
+    const right = { x: 0, y: 0, width: 1440, height: 900 };
+    const displays = [
+      { bounds: left, workArea: { x: -1920, y: 25, width: 1920, height: 1055 } },
+      { bounds: right, workArea: { x: 0, y: 38, width: 1440, height: 862 } },
+    ];
+    const saved = { x: -400, y: 60, width: 340, height: 88 };
+    const mainOnRight = { x: 100, y: 100, width: 1100, height: 780 };
+    assert.deepEqual(
+      DesktopWindow.resolveMusicMiniPlayerBounds(saved, displays, mainOnRight),
+      saved,
+    );
+    // The left display was unplugged: top-right of the work area holding the main window.
+    assert.deepEqual(
+      DesktopWindow.resolveMusicMiniPlayerBounds(saved, displays.slice(1), mainOnRight),
+      { x: 1440 - 340 - 16, y: 38 + 16, width: 340, height: 88 },
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveMusicMiniPlayerBounds(null, displays, {
+        x: -1800,
+        y: 100,
+        width: 1100,
+        height: 780,
+      }),
+      { x: -340 - 16, y: 25 + 16, width: 340, height: 88 },
+    );
+    // No main window: the first display.
+    assert.deepEqual(DesktopWindow.resolveMusicMiniPlayerBounds(null, displays, null), {
+      x: -340 - 16,
+      y: 25 + 16,
+      width: 340,
+      height: 88,
+    });
+  });
+
   it("rejects renderer navigations whose origin only serializes as null", () => {
     for (const applicationUrl of ["t3code://app/", "t3code-dev://app/"]) {
       assert.isTrue(
-        DesktopWindow.isSameOriginRendererNavigation({
+        ElectronProtocol.isSameOriginRendererNavigation({
           applicationUrl,
           navigationUrl: `${applicationUrl}threads?id=1#latest`,
         }),
@@ -537,7 +581,7 @@ describe("DesktopWindow", () => {
       "blob:t3code://app/0b5e2c4a",
     ]) {
       assert.isFalse(
-        DesktopWindow.isSameOriginRendererNavigation({
+        ElectronProtocol.isSameOriginRendererNavigation({
           applicationUrl: "t3code://app/",
           navigationUrl,
         }),
@@ -545,7 +589,7 @@ describe("DesktopWindow", () => {
       );
     }
     assert.isFalse(
-      DesktopWindow.isSameOriginRendererNavigation({
+      ElectronProtocol.isSameOriginRendererNavigation({
         applicationUrl: "data:text/html,app",
         navigationUrl: "data:text/html,other",
       }),

@@ -389,7 +389,9 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     const shell = yield* ElectronShell.ElectronShell;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     if (environment.platform !== "darwin") return false;
-    const owner = Electron.BrowserWindow.getFocusedWindow();
+    const owner = Option.getOrNull(
+      yield* (yield* ElectronWindow.ElectronWindow).focusedMainOrFirst,
+    );
     const opened = yield* shell.openSystemSettings(pane);
     if (opened && environment.isPackaged) {
       const permissions = yield* MacPermissions.MacPermissions;

@@ -42,6 +42,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { projectFaviconCache } from "../assets/projectFaviconCache";
+import { isMusicMiniPlayerWindow } from "../musicMiniPlayerWindow";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 5;
@@ -486,6 +487,18 @@ export interface CatalogBackend {
 
 export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
   const bridge = window.desktopBridge;
+  if (isMusicMiniPlayerWindow()) {
+    // It connects only to the primary environment; saved environments and their credentials stay
+    // with the main window, and desktop IPC refuses the catalog channels to this window.
+    let stored: string | null = null;
+    return {
+      read: Effect.sync(() => stored),
+      write: (raw) =>
+        Effect.sync(() => {
+          stored = raw;
+        }),
+    };
+  }
   if (bridge !== undefined) {
     return {
       read: Effect.tryPromise({

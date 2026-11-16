@@ -95,7 +95,10 @@ const REPLACED_TOAST_MS = 30_000;
 
 type ReadyState = Extract<MusicPlayerState, { _tag: "ready" }>;
 
-function stateSummary(state: MusicPlayerState): { title: string; detail: string | null } {
+export function musicStateSummary(state: MusicPlayerState): {
+  title: string;
+  detail: string | null;
+} {
   switch (state._tag) {
     case "ready":
       return state.track === null
@@ -171,7 +174,7 @@ function MusicPlayer({ environmentId }: { environmentId: EnvironmentId }) {
     });
   };
 
-  const summary = stateSummary(state);
+  const summary = musicStateSummary(state);
   const showControls = state._tag === "ready" || state._tag === "not-running";
 
   return (
@@ -328,7 +331,7 @@ function sliderStyle(fraction: number): CSSProperties {
 }
 
 /** Re-renders once a second so the position keeps up while playing. */
-function SeekBar({
+export function SeekBar({
   received,
   ready,
   disabled,

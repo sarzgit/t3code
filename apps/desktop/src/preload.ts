@@ -61,10 +61,13 @@ if (clientPlatform === "darwin") {
 const syncHtmlFullscreen = () => {
   const element = document.fullscreenElement;
   // A preview guest's fullscreen surfaces here as its <webview>, which stays inside the window.
-  void ipcRenderer.invoke(
-    IpcChannels.SYNC_HTML_FULLSCREEN_CHANNEL,
-    element !== null && element.tagName !== "WEBVIEW",
-  );
+  // Only the main window answers; other app windows such as the mini-player are refused.
+  void ipcRenderer
+    .invoke(
+      IpcChannels.SYNC_HTML_FULLSCREEN_CHANNEL,
+      element !== null && element.tagName !== "WEBVIEW",
+    )
+    .catch(() => undefined);
 };
 // A reload or renderer crash never reports the old document's exit, so each document reports its start.
 syncHtmlFullscreen();
@@ -369,6 +372,20 @@ contextBridge.exposeInMainWorld("desktopBridge", {
           wrappedListener,
         );
       };
+    },
+  },
+  musicMiniPlayer: {
+    toggle: () => ipcRenderer.invoke(IpcChannels.MUSIC_MINI_PLAYER_TOGGLE_CHANNEL),
+    getState: () => ipcRenderer.invoke(IpcChannels.MUSIC_MINI_PLAYER_GET_STATE_CHANNEL),
+    setPinned: (pinned) =>
+      ipcRenderer.invoke(IpcChannels.MUSIC_MINI_PLAYER_SET_PINNED_CHANNEL, pinned),
+    close: () => ipcRenderer.invoke(IpcChannels.MUSIC_MINI_PLAYER_CLOSE_CHANNEL),
+    openMain: () => ipcRenderer.invoke(IpcChannels.MUSIC_MINI_PLAYER_OPEN_MAIN_CHANNEL),
+    onSettingsChanged: (listener) => {
+      const handler = () => listener();
+      ipcRenderer.on(IpcChannels.MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL, handler);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL, handler);
     },
   },
   preview: {

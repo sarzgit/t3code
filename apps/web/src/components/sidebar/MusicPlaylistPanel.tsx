@@ -49,6 +49,7 @@ import {
   HeartIcon,
   HistoryIcon,
   MusicIcon,
+  PictureInPicture2Icon,
   PinIcon,
   PinOffIcon,
   PlayIcon,
@@ -143,8 +144,22 @@ export function MusicPanel({
   }
   const ready = state._tag === "ready" ? state : null;
   const track = ready?.track ?? null;
+  const miniPlayer = window.desktopBridge?.musicMiniPlayer;
+  const miniPlayerButton = miniPlayer ? (
+    <Button
+      variant="ghost-muted"
+      size="icon-sm"
+      aria-label="Mini player"
+      onClick={() => void miniPlayer.toggle()}
+    >
+      <PictureInPicture2Icon />
+    </Button>
+  ) : null;
   return (
     <div className="flex flex-col gap-3">
+      {!track && miniPlayerButton ? (
+        <div className="-mb-2 flex justify-end">{miniPlayerButton}</div>
+      ) : null}
       {track ? (
         <div className="flex items-center gap-3">
           <MusicArtwork environmentId={environmentId} track={track} size="lg" />
@@ -162,6 +177,7 @@ export function MusicPanel({
               disabled={!controllable}
             />
           ) : null}
+          {miniPlayerButton}
         </div>
       ) : null}
       {view.kind === "playlists" || view.kind === "up-next" || view.kind === "stats" ? (
@@ -225,7 +241,7 @@ export function MusicPanel({
 }
 
 /** Shows the click at once; Music's own value takes over once the watcher reports it. */
-function FavoriteButton({
+export function FavoriteButton({
   environmentId,
   track,
   favorited,

@@ -6,12 +6,14 @@ import "./index.css";
 
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { isElectron } from "./env";
-import { startAppServices } from "./appInit";
-import { AppRoot } from "./AppRoot";
+import { startAppServices, startMusicMiniPlayerServices } from "./appInit";
+import { AppRoot, MusicMiniPlayerAppRoot } from "./AppRoot";
 import { whenLocaleReady } from "./i18n/runtime";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
+import { isMusicMiniPlayerWindow } from "./musicMiniPlayerWindow";
 
-const router = startAppServices();
+const miniPlayerWindow = isMusicMiniPlayerWindow();
+const router = miniPlayerWindow ? startMusicMiniPlayerServices() : startAppServices();
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
@@ -25,11 +27,16 @@ window.addEventListener("vite:preloadError", (event) => {
   }
 });
 
-const app = <AppRoot router={router} />;
+const app = miniPlayerWindow ? (
+  <MusicMiniPlayerAppRoot router={router} />
+) : (
+  <AppRoot router={router} />
+);
 
 // Split by runtime to keep Clerk out of local startup and clerk-js out of browser builds.
+// The mini-player talks only to the primary local environment, so it needs no cloud session.
 const managedAuthShellModule =
-  clerkPublishableKey && hasCloudPublicConfig()
+  !miniPlayerWindow && clerkPublishableKey && hasCloudPublicConfig()
     ? isElectron
       ? import("./components/clerk/ElectronManagedAuthShell")
       : import("./components/clerk/BrowserManagedAuthShell")

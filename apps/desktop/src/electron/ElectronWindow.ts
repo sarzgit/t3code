@@ -107,6 +107,12 @@ export class ElectronWindowOperationError extends Schema.TaggedError<ElectronWin
   }
 }
 
+/** The one auxiliary window desktop IPC answers, for an allowlist of channels only. */
+export interface MusicMiniPlayerRegistration {
+  readonly window: Electron.BrowserWindow;
+  readonly applicationUrl: string;
+}
+
 export class ElectronWindow extends Context.Service<
   ElectronWindow,
   {
@@ -117,7 +123,11 @@ export class ElectronWindow extends Context.Service<
     ) => Effect.Effect<Electron.BrowserWindow, ElectronWindowCreateError>;
     readonly main: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly currentMainOrFirst: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
+    /** The focused app window, never an auxiliary one; falls back to the main-or-first window. */
     readonly focusedMainOrFirst: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
+    readonly musicMiniPlayer: Effect.Effect<Option.Option<MusicMiniPlayerRegistration>>;
+    readonly setMusicMiniPlayer: (registration: MusicMiniPlayerRegistration) => Effect.Effect<void>;
+    readonly clearMusicMiniPlayer: (window: Electron.BrowserWindow) => Effect.Effect<void>;
     readonly setMain: (window: Electron.BrowserWindow) => Effect.Effect<void>;
     readonly clearMain: (window: Option.Option<Electron.BrowserWindow>) => Effect.Effect<void>;
     readonly prepareReveal: (window: Electron.BrowserWindow) => Effect.Effect<boolean>;
@@ -144,6 +154,9 @@ export const make = Effect.gen(function* () {
   const captureRevealWindows = new Set<number>();
   yield* Effect.addFinalizer(() => Effect.sync(() => windowsForegroundFocus?.close()));
   const mainWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  const musicMiniPlayerRef = yield* Ref.make<Option.Option<MusicMiniPlayerRegistration>>(
+    Option.none(),
+  );
   const auxiliaryWindows = new WeakSet<Electron.BrowserWindow>();
 
   const listWindows = Effect.try({
@@ -206,10 +219,22 @@ export const make = Effect.gen(function* () {
           cause,
         }),
     }).pipe(Effect.orDie);
-    if (Option.isSome(focused) && !(yield* isWindowDestroyed(focused.value))) {
+    if (
+      Option.isSome(focused) &&
+      !auxiliaryWindows.has(focused.value) &&
+      !(yield* isWindowDestroyed(focused.value))
+    ) {
       return focused;
     }
     return yield* currentMainOrFirst;
+  });
+
+  const liveMusicMiniPlayer = Effect.gen(function* () {
+    const registration = yield* Ref.get(musicMiniPlayerRef);
+    if (Option.isNone(registration) || (yield* isWindowDestroyed(registration.value.window))) {
+      return Option.none<MusicMiniPlayerRegistration>();
+    }
+    return registration;
   });
 
   return ElectronWindow.of({
@@ -249,6 +274,15 @@ export const make = Effect.gen(function* () {
     main: liveMain,
     currentMainOrFirst,
     focusedMainOrFirst,
+    musicMiniPlayer: liveMusicMiniPlayer,
+    setMusicMiniPlayer: Effect.fn("ElectronWindow.setMusicMiniPlayer")(function (registration) {
+      return Ref.set(musicMiniPlayerRef, Option.some(registration));
+    }),
+    clearMusicMiniPlayer: Effect.fn("ElectronWindow.clearMusicMiniPlayer")(function (window) {
+      return Ref.update(musicMiniPlayerRef, (current) =>
+        Option.isSome(current) && current.value.window === window ? Option.none() : current,
+      );
+    }),
     setMain: Effect.fn("ElectronWindow.setMain")(function (window) {
       return Ref.set(mainWindowRef, Option.some(window));
     }),

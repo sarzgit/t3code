@@ -1176,6 +1176,15 @@ export interface DesktopBridge {
     onRequest: (listener: (request: DesktopAppActivationRequest) => void) => () => void;
   };
   preview: DesktopPreviewBridge;
+  /** The floating music window. Calls other than toggle are answered only for that window. */
+  musicMiniPlayer: {
+    toggle: () => Promise<void>;
+    getState: () => Promise<{ readonly pinned: boolean }>;
+    setPinned: (pinned: boolean) => Promise<void>;
+    close: () => Promise<void>;
+    openMain: () => Promise<void>;
+    onSettingsChanged: (listener: () => void) => () => void;
+  };
 }
 
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */

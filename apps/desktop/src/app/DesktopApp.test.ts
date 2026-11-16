@@ -38,6 +38,7 @@ import * as DesktopState from "./DesktopState.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as MiniPlayerWindow from "../music/MiniPlayerWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -235,6 +236,7 @@ it.effect.each([false, true])(
             Layer.mock(ElectronTheme.ElectronTheme, {}),
             Layer.mock(ElectronWindow.ElectronWindow, {}),
             Layer.mock(MacPermissions.MacPermissions, {}),
+            Layer.mock(MiniPlayerWindow.MusicMiniPlayerWindow, {}),
             Layer.mock(PreviewManager.PreviewManager, {
               isBrowserPartition: () => {
                 throw new Error("unexpected browser partition lookup");

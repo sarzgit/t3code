@@ -11,6 +11,7 @@ import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import * as MiniPlayerWindow from "../music/MiniPlayerWindow.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 export class DesktopApplicationMenuActionError extends Schema.TaggedError<DesktopApplicationMenuActionError>()(
@@ -35,7 +36,8 @@ export class DesktopApplicationMenu extends Context.Service<
 type DesktopApplicationMenuRuntimeServices =
   | DesktopUpdates.DesktopUpdates
   | DesktopWindow.DesktopWindow
-  | ElectronDialog.ElectronDialog;
+  | ElectronDialog.ElectronDialog
+  | MiniPlayerWindow.MusicMiniPlayerWindow;
 
 const { logInfo: logUpdaterInfo } = makeComponentLogger("desktop-updater");
 
@@ -309,6 +311,15 @@ export const make = Effect.gen(function* () {
         submenu: [
           { role: "minimize" },
           { role: "zoom" },
+          { type: "separator" },
+          {
+            label: "Mini Player",
+            click: () =>
+              runMenuEffect(
+                "toggle-music-mini-player",
+                Effect.flatMap(MiniPlayerWindow.MusicMiniPlayerWindow, (player) => player.toggle),
+              ),
+          },
           ...(environment.platform === "darwin"
             ? [{ type: "separator" as const }, { role: "front" as const }]
             : []),

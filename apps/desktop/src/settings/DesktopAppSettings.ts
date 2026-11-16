@@ -30,6 +30,8 @@ export interface DesktopSettings {
   readonly linuxPasswordStore: LinuxPasswordStorePreference;
   readonly mainWindowBounds: DesktopWindowBounds | null;
   readonly mainWindowMaximized: boolean;
+  readonly musicMiniPlayerBounds: DesktopWindowBounds | null;
+  readonly musicMiniPlayerPinned: boolean;
   readonly serverExposureMode: DesktopServerExposureMode;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
@@ -61,6 +63,13 @@ export const DesktopWindowBoundsSchema = Schema.Struct({
   height: Schema.Int.check(Schema.isGreaterThanOrEqualTo(MIN_MAIN_WINDOW_SIZE.height)),
 });
 export type DesktopWindowBounds = typeof DesktopWindowBoundsSchema.Type;
+export const MUSIC_MINI_PLAYER_SIZE = { width: 340, height: 88 } as const;
+const MusicMiniPlayerBoundsSchema = Schema.Struct({
+  x: Schema.Int,
+  y: Schema.Int,
+  width: Schema.Int.check(Schema.isGreaterThanOrEqualTo(MUSIC_MINI_PLAYER_SIZE.width)),
+  height: Schema.Int.check(Schema.isGreaterThanOrEqualTo(MUSIC_MINI_PLAYER_SIZE.height)),
+});
 export const DEFAULT_MAIN_WINDOW_SIZE = {
   width: 1100,
   height: 780,
@@ -71,6 +80,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   linuxPasswordStore: DEFAULT_LINUX_PASSWORD_STORE,
   mainWindowBounds: null,
   mainWindowMaximized: false,
+  musicMiniPlayerBounds: null,
+  musicMiniPlayerPinned: true,
   serverExposureMode: "local-only",
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
@@ -93,6 +104,8 @@ const DesktopSettingsDocument = Schema.Struct({
   linuxPasswordStore: Schema.optionalKey(Schema.Unknown),
   mainWindowBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
+  musicMiniPlayerBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
+  musicMiniPlayerPinned: Schema.optionalKey(Schema.Boolean),
   serverExposureMode: Schema.optionalKey(DesktopServerExposureModeSchema),
   tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
   tailscaleServePort: Schema.optionalKey(Schema.Number),
@@ -112,6 +125,7 @@ const decodeDesktopSettingsJson = Schema.decodeEffect(DesktopSettingsJson);
 const encodeDesktopSettingsJson = Schema.encodeEffect(DesktopSettingsJson);
 const decodeDesktopWindowBounds = Schema.decodeUnknownOption(DesktopWindowBoundsSchema);
 const desktopWindowBoundsEquivalence = Schema.toEquivalence(DesktopWindowBoundsSchema);
+const decodeMusicMiniPlayerBounds = Schema.decodeUnknownOption(MusicMiniPlayerBoundsSchema);
 
 const settingsChange = (settings: DesktopSettings, changed: boolean): DesktopSettingsChange => ({
   settings,
@@ -141,6 +155,11 @@ export class DesktopSettingsWriteError extends Schema.TaggedError<DesktopSetting
   }
 }
 
+export interface MusicMiniPlayerSettingsPatch {
+  readonly bounds?: DesktopWindowBounds;
+  readonly pinned?: boolean;
+}
+
 export class DesktopAppSettings extends Context.Service<
   DesktopAppSettings,
   {
@@ -152,6 +171,9 @@ export class DesktopAppSettings extends Context.Service<
     readonly setMainWindowBounds: (
       bounds: DesktopWindowBounds,
       isMaximized: boolean,
+    ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setMusicMiniPlayer: (
+      patch: MusicMiniPlayerSettingsPatch,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setServerExposureMode: (
       mode: DesktopServerExposureMode,
@@ -222,6 +244,10 @@ function normalizeDesktopSettingsDocument(
     linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
     mainWindowBounds,
     mainWindowMaximized: mainWindowBounds !== null && parsed.mainWindowMaximized === true,
+    musicMiniPlayerBounds: Option.getOrNull(
+      decodeMusicMiniPlayerBounds(parsed.musicMiniPlayerBounds),
+    ),
+    musicMiniPlayerPinned: parsed.musicMiniPlayerPinned !== false,
     serverExposureMode:
       parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
     tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
@@ -254,6 +280,12 @@ function toDesktopSettingsDocument(
   }
   if (settings.mainWindowMaximized) {
     document.mainWindowMaximized = true;
+  }
+  if (settings.musicMiniPlayerBounds !== null) {
+    document.musicMiniPlayerBounds = settings.musicMiniPlayerBounds;
+  }
+  if (!settings.musicMiniPlayerPinned) {
+    document.musicMiniPlayerPinned = false;
   }
   if (settings.serverExposureMode !== defaults.serverExposureMode) {
     document.serverExposureMode = settings.serverExposureMode;
@@ -309,6 +341,22 @@ function setMainWindowBounds(
         mainWindowBounds: bounds,
         mainWindowMaximized: isMaximized,
       };
+}
+
+function setMusicMiniPlayer(
+  settings: DesktopSettings,
+  input: MusicMiniPlayerSettingsPatch,
+): DesktopSettings {
+  const bounds = input.bounds ?? settings.musicMiniPlayerBounds;
+  const pinned = input.pinned ?? settings.musicMiniPlayerPinned;
+  const sameBounds =
+    bounds === settings.musicMiniPlayerBounds ||
+    (bounds !== null &&
+      settings.musicMiniPlayerBounds !== null &&
+      desktopWindowBoundsEquivalence(bounds, settings.musicMiniPlayerBounds));
+  return sameBounds && pinned === settings.musicMiniPlayerPinned
+    ? settings
+    : { ...settings, musicMiniPlayerBounds: bounds, musicMiniPlayerPinned: pinned };
 }
 
 function setTailscaleServe(
@@ -531,6 +579,9 @@ export const make = Effect.gen(function* () {
         return yield* persist((settings) => setMainWindowBounds(settings, bounds, isMaximized));
       },
     ),
+    setMusicMiniPlayer: Effect.fn("desktop.settings.setMusicMiniPlayer")(function* (patch) {
+      return yield* persist((settings) => setMusicMiniPlayer(settings, patch));
+    }),
     setServerExposureMode: Effect.fn("desktop.settings.setServerExposureMode")(function* (mode) {
       yield* Effect.annotateCurrentSpan({ mode });
 
@@ -604,6 +655,9 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
             return update((settings) => setMainWindowBounds(settings, bounds, isMaximized));
           },
         ),
+        setMusicMiniPlayer: Effect.fn("DesktopAppSettings.setMusicMiniPlayer")(function (patch) {
+          return update((settings) => setMusicMiniPlayer(settings, patch));
+        }),
         setServerExposureMode: Effect.fn("DesktopAppSettings.setServerExposureMode")(
           function (mode) {
             return update((settings) => setServerExposureMode(settings, mode));

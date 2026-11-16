@@ -26,6 +26,15 @@ const DesktopSettingsPatch = Schema.Struct({
     ),
   ),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
+  musicMiniPlayerBounds: Schema.optionalKey(
+    Schema.Struct({
+      x: Schema.Number,
+      y: Schema.Number,
+      width: Schema.Number,
+      height: Schema.Number,
+    }),
+  ),
+  musicMiniPlayerPinned: Schema.optionalKey(Schema.Boolean),
   serverExposureMode: Schema.optionalKey(Schema.Literals(["local-only", "network-accessible"])),
   tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
   tailscaleServePort: Schema.optionalKey(Schema.Number),
@@ -183,6 +192,8 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: { x: 120, y: 80, width: 1280, height: 900 },
           mainWindowMaximized: false,
+          musicMiniPlayerBounds: null,
+          musicMiniPlayerPinned: true,
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
@@ -229,6 +240,8 @@ describe("DesktopSettings", () => {
 
         yield* settings.setMainWindowBounds({ x: -1200, y: 40, width: 400, height: 360 }, true);
         yield* settings.setServerExposureMode("network-accessible");
+        yield* settings.setMusicMiniPlayer({ bounds: { x: 1500, y: 40, width: 340, height: 88 } });
+        yield* settings.setMusicMiniPlayer({ pinned: false });
 
         const persisted = yield* decodeDesktopSettingsPatch(
           yield* fileSystem.readFileString(environment.desktopSettingsPath),
@@ -236,6 +249,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(persisted, {
           mainWindowBounds: { x: -1200, y: 40, width: 400, height: 360 },
           mainWindowMaximized: true,
+          musicMiniPlayerBounds: { x: 1500, y: 40, width: 340, height: 88 },
+          musicMiniPlayerPinned: false,
           serverExposureMode: "network-accessible",
         } satisfies typeof DesktopSettingsPatch.Type);
 
@@ -245,6 +260,8 @@ describe("DesktopSettings", () => {
         }).pipe(Effect.provide(DesktopAppSettings.layer));
         assert.deepEqual(restored.mainWindowBounds, persisted.mainWindowBounds);
         assert.isTrue(restored.mainWindowMaximized);
+        assert.deepEqual(restored.musicMiniPlayerBounds, persisted.musicMiniPlayerBounds);
+        assert.isFalse(restored.musicMiniPlayerPinned);
       }),
     ),
   );
@@ -314,6 +331,8 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          musicMiniPlayerBounds: null,
+          musicMiniPlayerPinned: true,
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -343,6 +362,8 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          musicMiniPlayerBounds: null,
+          musicMiniPlayerPinned: true,
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,

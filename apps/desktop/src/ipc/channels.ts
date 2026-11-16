@@ -137,3 +137,11 @@ export const RECEIVE_PROVIDER_AUTH_CALLBACK_CHANNEL = "desktop:receive-provider-
 export const CANCEL_PROVIDER_AUTH_CALLBACK_CHANNEL = "desktop:cancel-provider-auth-callback";
 export const TAKE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:take-legacy-local-storage";
 export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-local-storage";
+
+export const MUSIC_MINI_PLAYER_TOGGLE_CHANNEL = "desktop:music-mini-player-toggle";
+export const MUSIC_MINI_PLAYER_GET_STATE_CHANNEL = "desktop:music-mini-player-get-state";
+export const MUSIC_MINI_PLAYER_SET_PINNED_CHANNEL = "desktop:music-mini-player-set-pinned";
+export const MUSIC_MINI_PLAYER_CLOSE_CHANNEL = "desktop:music-mini-player-close";
+export const MUSIC_MINI_PLAYER_OPEN_MAIN_CHANNEL = "desktop:music-mini-player-open-main";
+export const MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL =
+  "desktop:music-mini-player-settings-changed";
