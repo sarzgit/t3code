@@ -1822,6 +1822,9 @@ describe("MusicPlayer queue", () => {
           "seek-before-end",
           "42",
           "10",
+          songs[2]!.id,
+          PLAYLIST_ID,
+          "seek",
         ]);
         const resumed = (yield* until(statuses, (status) => status.active !== null)).active;
         assert.deepStrictEqual(resumed, {
@@ -1945,6 +1948,9 @@ describe("MusicPlayer queue", () => {
               "seek-before-end",
               "61",
               "10",
+              saved,
+              PLAYLIST_ID,
+              "seek",
             ]);
             const active = (yield* until(statuses, (status) => status.active !== null)).active!;
             assert.strictEqual(active.currentKey, "s3");
@@ -1971,6 +1977,39 @@ describe("MusicPlayer queue", () => {
           Effect.scoped,
         );
       }
+    }),
+  );
+
+  it.effect("leaves a song Music switched to during Resume untouched and the queue saved", () =>
+    Effect.gen(function* () {
+      const { songs, fake, files } = yield* savedEditedQueue();
+      const restarted = yield* makeHarness({
+        respond: (args) => {
+          // Between Resume's play and its seek, something else starts in Music.
+          if (args.includes("seek-before-end")) {
+            fake.player.current = songs[3]!.id;
+            fake.player.playlist = "5CA38D01224697B4";
+          }
+          return runFakeScript(args, fake.music);
+        },
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const card = (yield* Queue.take(statuses)).saved!;
+        fake.player.position = 3;
+        const error = yield* Effect.flip(
+          player.resumeQueue({ queueId: card.id, revision: card.revision }),
+        );
+        assert.strictEqual(error.reason, "queue-changed");
+        // The other song keeps its position, and T3 claims nothing.
+        assert.strictEqual(fake.player.position, 3);
+        const now = yield* Queue.take(yield* subscribeQueue(player));
+        assert.deepStrictEqual([now.active, now.saved?.id], [null, card.id]);
+      }).pipe(
+        providePlayer(restarted.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
+        Effect.scoped,
+      );
     }),
   );
 
@@ -2239,6 +2278,9 @@ describe("MusicPlayer queue", () => {
           "seek-before-end",
           "30",
           "10",
+          songs[0]!.id,
+          PLAYLIST_ID,
+          "seek",
         ]);
         const restored = yield* until(statuses, (status) => status.active?.id === replacedId);
         assert.deepStrictEqual(restored.replaced, null);

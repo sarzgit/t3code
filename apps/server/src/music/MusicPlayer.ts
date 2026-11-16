@@ -604,8 +604,13 @@ const CONTROL_SCRIPT = `function run(argv) {
     case "shuffle-on": Music.shuffleEnabled = true; break;
     case "shuffle-off": Music.shuffleEnabled = false; break;
     case "seek": Music.playerPosition = Number(argv[1]); break;
-    // Resume only: the saved song's length is often unknown until Music has it playing.
+    // Resume only: still the song Resume played, from its playlist? The saved song's length is
+    // often unknown until Music has it playing. argv: position, tail, track id, playlist id, seek.
     case "seek-before-end": {
+      let playlistId = null;
+      try { playlistId = Music.currentPlaylist.persistentID(); } catch (error) {}
+      if (Music.currentTrack.persistentID() !== argv[3] || playlistId !== argv[4]) return "changed";
+      if (argv[5] !== "seek") return "kept";
       const duration = Number(Music.currentTrack.duration());
       const position = Number(argv[1]);
       if (!(duration > 0) || position >= duration - Number(argv[2])) return "end";
@@ -2979,19 +2984,23 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     const index = Number.isInteger(played) ? played : song.index;
     const now = yield* Clock.currentTimeMillis;
     const pick = yield* savedPick(state, song, index, now);
-    forgetPending();
-    unavailableKeys = new Set();
     const durationSec = song.meta?.durationSec ?? 0;
     const wanted =
       state.positionSec > RESUME_MIN_SECONDS &&
       (durationSec === 0 || state.positionSec < durationSec - RESUME_TAIL_SECONDS);
-    const seek =
-      wanted &&
-      (yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [
-        "seek-before-end",
-        String(state.positionSec),
-        String(RESUME_TAIL_SECONDS),
-      ]).pipe(Effect.orElseSucceed(() => "failed"))) === "ok";
+    const placed = yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [
+      "seek-before-end",
+      String(state.positionSec),
+      String(RESUME_TAIL_SECONDS),
+      song.trackId,
+      song.playlistId,
+      wanted ? "seek" : "check",
+    ]);
+    // Music moved on before Resume could seek: that song is someone else's; the queue stays saved.
+    if (placed === "changed") return yield* queueChanged();
+    forgetPending();
+    unavailableKeys = new Set();
+    const seek = placed === "ok";
     if (seek) yield* Ref.set(seekSinceSample, { positionSec: state.positionSec, atMs: now });
     yield* Ref.set(picked, seek ? { ...pick, positionSec: state.positionSec } : pick);
     yield* commit(
