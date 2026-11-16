@@ -1976,6 +1976,54 @@ describe("MusicPlayer queue", () => {
     }),
   );
 
+  it.effect("takes an unedited queue back only when its song is in the playlist once", () =>
+    Effect.gen(function* () {
+      for (const duplicate of [false, true]) {
+        const songs = queueSongs(4);
+        const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+        const first = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+        const files = yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const store = yield* MusicQueueStore.MusicQueueStore;
+          const statuses = yield* subscribeQueue(player);
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(first.sessions);
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 });
+          yield* until(statuses, (status) => status.active !== null);
+          session.emit(playingSample(songs[1]!.id, { position: 60 }));
+          yield* Queue.take(received);
+          session.emit(playingSample(songs[1]!.id, { position: 61, state: "paused" }));
+          yield* until(received, (state) => state._tag === "ready" && state.playback === "paused");
+          yield* store.settled;
+          return yield* store.load;
+        }).pipe(providePlayer(first.runner), Effect.scoped);
+        if (duplicate) songs[3]!.id = songs[1]!.id;
+        const played = fake.played.length;
+        const restarted = yield* makeHarness({
+          respond: (args) => runFakeScript(args, fake.music),
+        });
+        const active = yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(restarted.sessions);
+          session.emit(playingSample(songs[1]!.id, { position: 61, state: "paused" }));
+          yield* until(received, (state) => state._tag === "ready");
+          return (yield* Queue.take(yield* subscribeQueue(player))).active;
+        }).pipe(
+          providePlayer(restarted.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
+          Effect.scoped,
+        );
+        // Either way Music is only read, never played or moved.
+        assert.strictEqual(fake.played.length, played);
+        assert.deepStrictEqual(
+          active === null ? null : { edited: active.edited, currentKey: active.currentKey },
+          duplicate ? null : { edited: false, currentKey: "s1" },
+          `duplicate=${duplicate}`,
+        );
+      }
+    }),
+  );
+
   it.effect("takes a restored queue back only when Music still holds its song where it was", () =>
     Effect.gen(function* () {
       const { songs, fake, files } = yield* savedEditedQueue();

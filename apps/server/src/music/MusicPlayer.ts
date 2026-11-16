@@ -325,6 +325,14 @@ const PLAY_TRACK_SCRIPT = `function run(argv) {
   return "ok:" + target;
 }${SONGS_JXA}`;
 
+// Read-only: how many times a song sits in a playlist.
+const COPIES_SCRIPT = `function run(argv) {
+  const Music = Application("Music");
+  const found = Music.playlists.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "0";
+  return String(songs(Music, found[0]).ids.filter((id) => id === argv[1]).length);
+}${SONGS_JXA}`;
+
 // Reads the whole library once; the server filters it, so a query never reaches a script.
 const LIBRARY_SCRIPT = `function run() {
   const Music = Application("Music");
@@ -2903,14 +2911,18 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     }
     // A song queued twice: Music's position can't say which copy is playing.
     const explicit = current.explicit;
-    if (
-      explicit !== null &&
-      explicit.order.filter(
-        (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
-      ).length > 1
-    ) {
-      return;
-    }
+    const copies =
+      explicit !== null
+        ? explicit.order.filter(
+            (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
+          ).length
+        : Number(
+            yield* runScript("queue", "JavaScript", COPIES_SCRIPT, [
+              song.playlistId,
+              track.id,
+            ]).pipe(Effect.orElseSucceed(() => "0")),
+          );
+    if (copies !== 1) return;
     const drift = state.positionSec - current.positionSec;
     const holds =
       state.playback === "paused"
