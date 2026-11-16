@@ -15,6 +15,16 @@ const validPreload = `
 `;
 
 describe("desktop preload bundle verifier", () => {
+  it("requires the mini-player's preload to expose the desktop bridge without Clerk", () => {
+    const miniPlayer = validPreload.replace(
+      `electron.contextBridge.exposeInMainWorld("__clerk_internal_electron_passkeys", {});`,
+      "",
+    );
+    assert.doesNotThrow(() => verifyPreloadBundle(miniPlayer, { clerk: false }));
+    assert.throws(() => verifyPreloadBundle(validPreload, { clerk: false }), /exposes Clerk/);
+    assert.throws(() => verifyPreloadBundle(miniPlayer), /missing executable APIs/);
+  });
+
   it("rejects required API names that only appear in strings", () => {
     assert.throws(
       () =>

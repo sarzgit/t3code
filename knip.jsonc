@@ -89,6 +89,7 @@
         "src/serverCompileCache.ts!",
         "src/main.ts!",
         "src/preload.ts!",
+        "src/musicMiniPlayerPreload.ts!",
         "src/preview-pick-preload.ts!",
         "src/preview-pip-preload.ts!",
         "src/mac-permission-preload.ts!",

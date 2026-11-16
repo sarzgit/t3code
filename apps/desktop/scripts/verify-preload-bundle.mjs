@@ -122,7 +122,8 @@ const executeBundle = (source, sandboxModules) => {
   );
 };
 
-export const verifyPreloadBundle = (source) => {
+/** `clerk: false` is the mini-player's preload, which must expose none of Clerk's bridge. */
+export const verifyPreloadBundle = (source, { clerk = true } = {}) => {
   const runtimeImports = inspectBundle(source);
   const exposedGlobals = new Map();
   const sandboxModules = createSandboxModules(exposedGlobals);
@@ -143,7 +144,13 @@ export const verifyPreloadBundle = (source) => {
     (api) => typeof desktopBridge?.[api] !== "function",
   );
   if (!exposedGlobals.has("desktopBridge")) missingApis.unshift("desktopBridge exposure");
-  if (!exposedGlobals.has(clerkPasskeysGlobal)) missingApis.push(`${clerkPasskeysGlobal} exposure`);
+  if (clerk && !exposedGlobals.has(clerkPasskeysGlobal)) {
+    missingApis.push(`${clerkPasskeysGlobal} exposure`);
+  }
+  const clerkGlobals = [...exposedGlobals.keys()].filter((name) => /clerk/i.test(name));
+  if (!clerk && clerkGlobals.length > 0) {
+    throw new Error(`Mini-player preload bundle exposes Clerk: ${clerkGlobals.join(", ")}`);
+  }
 
   if (missingApis.length > 0) {
     throw new Error(`Desktop preload bundle is missing executable APIs: ${missingApis.join(", ")}`);
@@ -152,6 +159,7 @@ export const verifyPreloadBundle = (source) => {
 
 if (process.argv[1] && NodeURL.pathToFileURL(process.argv[1]).href === import.meta.url) {
   const preloadUrl = new URL("../dist-electron/preload.cjs", import.meta.url);
-  const source = await NodeFSP.readFile(preloadUrl, "utf8");
-  verifyPreloadBundle(source);
+  verifyPreloadBundle(await NodeFSP.readFile(preloadUrl, "utf8"));
+  const miniPlayerUrl = new URL("../dist-electron/musicMiniPlayerPreload.cjs", import.meta.url);
+  verifyPreloadBundle(await NodeFSP.readFile(miniPlayerUrl, "utf8"), { clerk: false });
 }

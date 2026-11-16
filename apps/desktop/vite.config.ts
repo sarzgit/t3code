@@ -12,7 +12,7 @@ import {
 
 const repoEnv = loadRepoEnv();
 const isolatedIdentity = repoEnv.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "";
-const domTests = ["src/preview/PickPreload.test.ts"];
+const domTests = ["src/preview/PickPreload.test.ts", "src/preload.test.ts"];
 
 // Install only bundle externals; the server bundle already carries its dependency tree.
 const isMainProcessExternal = (id: string) =>
@@ -169,6 +169,15 @@ export default defineConfig({
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/mac-permission-preload.ts"],
+    },
+    {
+      // The mini-player's own preload: the desktop bridge without Clerk's.
+      format: "cjs",
+      outDir: "dist-electron",
+      dts: false,
+      sourcemap: true,
+      outExtensions: () => ({ js: ".cjs" }),
+      entry: ["src/musicMiniPlayerPreload.ts"],
     },
   ],
   test: {

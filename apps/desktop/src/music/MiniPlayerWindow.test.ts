@@ -1,4 +1,8 @@
+import * as NodeModule from "node:module";
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Path from "effect/Path";
+import * as FileSystem from "effect/FileSystem";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -34,7 +38,9 @@ function makeFakeWindow() {
   const contentsListeners = new Map<string, Listener[]>();
   let destroyed = false;
   let openHandler: ((details: { url: string }) => { action: string }) | undefined;
+  const ownHandlers = new Map<string, () => unknown>();
   const window = {
+    ownHandlers,
     calls: [] as string[],
     sent: [] as string[],
     on: (event: string, listener: Listener) => {
@@ -76,6 +82,11 @@ function makeFakeWindow() {
       setWindowOpenHandler: (handler: typeof openHandler) => {
         openHandler = handler;
       },
+      ipc: {
+        handle: (channel: string, handler: () => unknown) => {
+          ownHandlers.set(channel, handler);
+        },
+      },
     },
   };
   return window;
@@ -100,6 +111,7 @@ const setup = Effect.gen(function* () {
           isDevelopment: false,
           displayName: "T3 Code",
           preloadPath: "/app/preload.cjs",
+          musicMiniPlayerPreloadPath: "/app/musicMiniPlayerPreload.cjs",
         } as DesktopEnvironment.DesktopEnvironment["Service"]),
         DesktopState.layer,
         Layer.mock(ElectronTheme.ElectronTheme, { shouldUseDarkColors: Effect.succeed(true) }),
@@ -140,8 +152,9 @@ it.effect("keeps one isolated, registered window and closes it when the player i
       const { options, auxiliary, window } = created[0]!;
       assert.isTrue(auxiliary);
       assert.deepInclude(options, { x: 1440 - 340 - 16, y: 38 + 16, alwaysOnTop: true });
+      // Its own preload: the desktop bridge without Clerk's sign-in, token and passkey bridge.
       assert.deepInclude(options.webPreferences, {
-        preload: "/app/preload.cjs",
+        preload: "/app/musicMiniPlayerPreload.cjs",
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
@@ -160,6 +173,10 @@ it.effect("keeps one isolated, registered window and closes it when the player i
       const allowed = { prevented: false, preventDefault: () => (allowed.prevented = true) };
       window.emitContents("will-navigate", allowed, "t3code://app/#/music/mini");
       assert.deepEqual([blocked.prevented, allowed.prevented], [true, false]);
+
+      // And Clerk's main-process handlers never answer it, whatever reaches them.
+      assert.sameMembers([...window.ownHandlers.keys()], [...MiniPlayerWindow.CLERK_CHANNELS]);
+      for (const handler of window.ownHandlers.values()) assert.throws(handler);
 
       window.emit("ready-to-show");
       yield* Effect.yieldNow;
@@ -247,4 +264,20 @@ it.effect("closes on Cmd+W or Escape only, leaving other chords to the renderer"
       assert.include(created[1]!.window.calls, "close");
     }).pipe(Effect.provide(layer));
   }),
+);
+
+it.effect("refuses every channel the installed Clerk SDK handles in the main process", () =>
+  Effect.gen(function* () {
+    // The SDK names its channels in one shared module; a new one must be added to the list.
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sdk = path.dirname(NodeModule.createRequire(import.meta.url).resolve("@clerk/electron"));
+    const channels = new Set<string>();
+    for (const file of (yield* fs.readDirectory(sdk)).filter((name) => name.endsWith(".js"))) {
+      const source = yield* fs.readFileString(path.join(sdk, file));
+      for (const match of source.matchAll(/"(clerk:[a-z-]+:[a-z-]+)"/g)) channels.add(match[1]!);
+    }
+    assert.isAbove(channels.size, 0);
+    assert.sameMembers([...channels], [...MiniPlayerWindow.CLERK_CHANNELS]);
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

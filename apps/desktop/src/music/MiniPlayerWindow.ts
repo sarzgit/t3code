@@ -20,6 +20,22 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 
+/**
+ * Every IPC channel @clerk/electron's main process handles: tokens, OAuth (which opens external
+ * URLs) and passkeys. The mini-player has no sign-in, so it may call none of them.
+ * MiniPlayerWindow.test.ts checks this list against the installed SDK.
+ */
+export const CLERK_CHANNELS = [
+  "clerk:token-cache:get",
+  "clerk:token-cache:save",
+  "clerk:token-cache:clear",
+  "clerk:oauth-transport:get-redirect-url",
+  "clerk:oauth-transport:open",
+  "clerk:passkeys:create",
+  "clerk:passkeys:get",
+  "clerk:passkeys:capabilities",
+] as const;
+
 const BOUNDS_PERSIST_DEBOUNCE_MS = 500;
 const MINI_PLAYER_ROUTE = "#/music/mini";
 
@@ -134,7 +150,7 @@ export const make = Effect.gen(function* () {
         backgroundColor: shouldUseDarkColors ? "#000000" : "#ffffff",
         ...(environment.platform === "darwin" ? { type: "panel" as const } : {}),
         webPreferences: {
-          preload: environment.preloadPath,
+          preload: environment.musicMiniPlayerPreloadPath,
           // The seek bar keeps time while another app is focused.
           backgroundThrottling: false,
           contextIsolation: true,
@@ -155,6 +171,12 @@ export const make = Effect.gen(function* () {
       }
     });
     window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+    // Clerk's handlers accept any top-level window; handlers on this window's own IPC run first.
+    for (const channel of CLERK_CHANNELS) {
+      window.webContents.ipc.handle(channel, () => {
+        throw new Error("Not available in the mini-player.");
+      });
+    }
     window.webContents.on("before-input-event", (event, input) => {
       if (input.type !== "keyDown") return;
       const modifier = environment.platform === "darwin" ? input.meta : input.control;
