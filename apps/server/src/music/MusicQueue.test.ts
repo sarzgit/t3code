@@ -198,12 +198,22 @@ describe("MusicQueue shuffle and Reset", () => {
 
   it("restores a list queue's original membership and order after Clear", () => {
     const original = [song(1), song(2), song(3), song(1)];
-    let queue = MusicQueue.fromList({ id: "qlist01", kind: "favourites", original, start: 1 });
+    const list = { id: "qlist01", kind: "favourites" as const, original, start: 1 };
+    let queue = MusicQueue.fromList({ ...list, shuffleSeed: null });
     assert.deepStrictEqual(keys(queue), ["s0", "s1", "s2", "s3"]);
     queue = edited(MusicQueue.applyEdit(queue, 0, { _tag: "clear-upcoming" }));
     queue = edited(MusicQueue.applyEdit(queue, 1, { _tag: "reset" }));
     assert.deepStrictEqual(keys(queue), ["s0", "s1", "s2", "s3"]);
     assert.strictEqual(MusicQueue.songForKey(queue, "s3")!.trackId, id(1));
+    // Shuffled, the chosen song plays first and nothing counts as played; Reset is list order.
+    let shuffledList = MusicQueue.fromList({ ...list, shuffleSeed: 7 });
+    assert.deepStrictEqual([shuffledList.cursor, keys(shuffledList)[0]], [0, "s1"]);
+    assert.sameMembers(keys(shuffledList), ["s0", "s1", "s2", "s3"]);
+    shuffledList = edited(MusicQueue.applyEdit(shuffledList, 0, { _tag: "reset" }));
+    assert.deepStrictEqual(
+      [shuffledList.cursor, keys(shuffledList), shuffledList.shuffle],
+      [1, ["s0", "s1", "s2", "s3"], null],
+    );
   });
 });
 

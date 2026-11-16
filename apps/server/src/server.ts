@@ -90,6 +90,7 @@ import * as DeviceService from "./device/DeviceService.ts";
 import * as MusicAgentWatch from "./music/MusicAgentWatch.ts";
 import * as MusicListeningStats from "./music/MusicListeningStats.ts";
 import * as MusicQueueStore from "./music/MusicQueueStore.ts";
+import * as MusicRecent from "./music/MusicRecent.ts";
 import * as MusicLibrarySync from "./music/MusicLibrarySync.ts";
 import * as MusicPlayer from "./music/MusicPlayer.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -519,6 +520,7 @@ const layerMusic = Layer.mergeAll(MusicPlayer.layer, MusicLibrarySync.layer).pip
   Layer.provide(ProcessRunner.layer),
   Layer.provide(MusicListeningStats.layer),
   Layer.provide(MusicQueueStore.layer),
+  Layer.provide(MusicRecent.layer),
 );
 
 const layerWorkspaceEntries = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));

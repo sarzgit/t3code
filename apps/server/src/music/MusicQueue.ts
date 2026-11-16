@@ -141,21 +141,36 @@ export function materialise(input: {
   };
 }
 
-/** A Favourites or Recently played queue, in list order from `start`. */
+/**
+ * A Favourites or Recently played queue: in list order with the songs before `start` already
+ * played, or shuffled with `start` first.
+ */
 export function fromList(input: {
   readonly id: string;
   readonly kind: QueueListKind;
   readonly original: ReadonlyArray<QueueSong>;
   readonly start: number;
+  readonly shuffleSeed: number | null;
 }): ExplicitQueue {
+  const positions = input.original.map((_, i) => i);
+  const seed = input.shuffleSeed;
   return {
     id: input.id,
     revision: 0,
     source: { kind: input.kind, original: input.original },
-    order: input.original.map((_, i) => i),
+    order:
+      seed === null
+        ? positions
+        : [
+            input.start,
+            ...shuffled(
+              positions.filter((i) => i !== input.start),
+              seed,
+            ),
+          ],
     added: [],
-    cursor: input.start,
-    shuffle: null,
+    cursor: seed === null ? input.start : 0,
+    shuffle: seed === null ? null : { seed },
     lastRemoved: null,
   };
 }

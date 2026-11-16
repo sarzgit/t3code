@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   arrangeMusicPlaylists,
   formatTrackTime,
+  musicListPages,
   musicPositionAt,
   musicQueueEditBase,
   musicUpNextSource,
@@ -83,6 +84,13 @@ describe("musicUpNextSource", () => {
       queueId: "qabc123",
       expectedRevision: 3,
     });
+  });
+
+  it("keeps Show more pages only while the library read behind them holds", () => {
+    expect(musicListPages({ count: 3, snapshotAt: 100 }, 100)).toBe(3);
+    expect(musicListPages({ count: 3, snapshotAt: 100 }, 160)).toBe(1);
+    expect(musicListPages({ count: 3, snapshotAt: 100 }, null)).toBe(1);
+    expect(musicListPages({ count: 1, snapshotAt: null }, 100)).toBe(1);
   });
 
   it("wraps only under repeat all", () => {

@@ -66,6 +66,11 @@ import * as ProcessRunner from "../processRunner.ts";
 import { localDayKey, MusicListeningStats } from "./MusicListeningStats.ts";
 import * as MusicQueue from "./MusicQueue.ts";
 import * as MusicQueueStore from "./MusicQueueStore.ts";
+import {
+  followRecentPlay,
+  MusicRecent as MusicRecentStore,
+  type RecentPlay,
+} from "./MusicRecent.ts";
 
 type QueueDisplay = MusicQueueStore.QueueDisplay;
 type QueueFormula = MusicQueueStore.QueueFormula;
@@ -333,8 +338,24 @@ const LIBRARY_SCRIPT = `function run() {
     artists: list.pick(library.tracks.artist()).map(clip),
     albums: list.pick(library.tracks.album()).map(clip),
     durations: list.pick(library.tracks.duration()),
+    favorited: favoritedColumn(list, library.tracks),
   });
+}
+// macOS 14 renamed "loved" to "favorited". Without either, only Favourites goes; search stays.
+function favoritedColumn(list, tracks) {
+  try { return list.pick(tracks.favorited()); } catch (error) {}
+  try { return list.pick(tracks.loved()); } catch (error) {}
+  return null;
 }${SONGS_JXA}`;
+
+// Any library song by id, not only the current one.
+const FAVORITE_TRACK_SCRIPT = `function run(argv) {
+  const found = Application("Music").libraryPlaylists[0].tracks.whose({ persistentID: argv[0] })();
+  if (found.length === 0) return "not-found";
+  const value = argv[1] === "true";
+  try { found[0].favorited = value; } catch (error) { found[0].loved = value; }
+  return "ok";
+}`;
 
 // Finds the current song the way STEP_SCRIPT does, so the list is what next will play.
 const UP_NEXT_SCRIPT = `function run(argv) {
@@ -727,6 +748,7 @@ const RawLibrary = Schema.Struct({
   artists: Schema.Array(Schema.NullOr(Schema.String)),
   albums: Schema.Array(Schema.NullOr(Schema.String)),
   durations: Schema.Array(Schema.NullOr(Schema.Number)),
+  favorited: Schema.optional(Schema.NullOr(Schema.Array(Schema.NullOr(Schema.Boolean)))),
 });
 const decodeRawLibrary = Schema.decodeUnknownOption(Schema.fromJsonString(RawLibrary));
 const MAX_LIBRARY_BYTES = 32 * 1024 * 1024;
@@ -908,10 +930,14 @@ interface LibraryEntry {
 interface MusicLibrarySnapshot {
   readonly playlistId: string;
   readonly entries: ReadonlyArray<LibraryEntry>;
+  readonly byId: ReadonlyMap<string, LibraryEntry>;
+  /** Favourited song ids; T3's own changes patch it in place. Null when Music can't say. */
+  readonly favorited: Set<string> | null;
+  readonly readAt: number;
 }
 
 /** One library read; a malformed row drops alone and the others keep their positions. */
-function decodeLibrarySnapshot(stdout: string): MusicLibrarySnapshot | null {
+function decodeLibrarySnapshot(stdout: string, readAt: number): MusicLibrarySnapshot | null {
   const raw = Option.getOrNull(decodeRawLibrary(stdout));
   const playlistId = persistentId(raw?.playlistId);
   if (raw === null || playlistId === null) return null;
@@ -934,7 +960,42 @@ function decodeLibrarySnapshot(stdout: string): MusicLibrarySnapshot | null {
       },
     ];
   });
-  return { playlistId, entries };
+  const flags = raw.favorited ?? null;
+  return {
+    playlistId,
+    entries,
+    byId: new Map(entries.map((entry) => [entry.song.id, entry])),
+    favorited:
+      flags === null
+        ? null
+        : new Set(
+            entries.flatMap((entry) => (flags[entry.song.index] === true ? [entry.song.id] : [])),
+          ),
+    readAt,
+  };
+}
+
+const matchesWords = (entry: LibraryEntry, words: ReadonlyArray<string>) =>
+  words.every((word) => entry.foldedText.includes(word));
+
+/** Favourited songs in library order, filtered like search; null when Music can't say. */
+function listFavoriteSongs(
+  snapshot: MusicLibrarySnapshot,
+  input: MusicListFavoritesInput,
+): MusicFavorites | null {
+  const favorited = snapshot.favorited;
+  if (favorited === null) return null;
+  const needle = fold(input.query ?? "");
+  const words = needle === "" ? [] : needle.split(" ");
+  const matches = snapshot.entries.filter(
+    (entry) => favorited.has(entry.song.id) && matchesWords(entry, words),
+  );
+  return {
+    playlistId: snapshot.playlistId,
+    songs: matches.slice(input.offset, input.offset + input.limit).map((entry) => entry.song),
+    total: matches.length,
+    snapshotAt: snapshot.readAt,
+  };
 }
 
 /** Every word must appear in a song's name, artist or album; name matches rank first. */
@@ -948,9 +1009,7 @@ function searchMusicLibrary(
   const rank = (entry: LibraryEntry) =>
     entry.foldedName.startsWith(needle) ? 0 : entry.foldedName.includes(needle) ? 1 : 2;
   const matches =
-    words.length === 0
-      ? []
-      : snapshot.entries.filter((entry) => words.every((word) => entry.foldedText.includes(word)));
+    words.length === 0 ? [] : snapshot.entries.filter((entry) => matchesWords(entry, words));
   return {
     playlistId: snapshot.playlistId,
     songs: matches
@@ -1245,10 +1304,7 @@ function makeLineSplitter(onLine: (line: string) => void) {
   };
 }
 
-const notYet = (operation: MusicError["operation"]) =>
-  Effect.fn("MusicPlayer.notYet")(function* (_input: unknown) {
-    return yield* new MusicError({ operation, reason: "unavailable" });
-  });
+const LIST_LABELS = { favourites: "Favourites", recent: "Recently played" } as const;
 
 const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNextHelper: string }) {
   const platform = yield* HostProcess.Platform;
@@ -1256,6 +1312,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const listening = yield* MusicListeningStats;
+  const recent = yield* MusicRecentStore;
   const supported = platform === "darwin";
 
   const states = yield* PubSub.sliding<MusicPlayerState>(16);
@@ -1350,6 +1407,44 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   /** The last normal playlist list, for labels only; never fetched just for a label. */
   let playlistNames: ReadonlyMap<string, string> = new Map();
   let libraryId: string | null = null;
+  /** Bump when an open Favourites or Recently played view should read again. */
+  let favouritesRevision = 0;
+  let recentRevision = 0;
+  let recentPlay: RecentPlay | null = null;
+  /** The current song's favourite flag as last sampled, to notice a change made in Music. */
+  let favoriteSeen: { readonly trackId: string; readonly value: boolean } | null = null;
+  /** T3's own favourite write; samples showing the old value are ignored until this passes. */
+  let favoriteWrite: {
+    readonly trackId: string;
+    readonly value: boolean;
+    readonly deadline: number;
+  } | null = null;
+
+  const readLibrary = Effect.fn("MusicPlayer.readLibrary")(function* () {
+    const result = yield* runScript(
+      "search-library",
+      "JavaScript",
+      LIBRARY_SCRIPT,
+      [],
+      MAX_LIBRARY_BYTES,
+    );
+    const snapshot = decodeLibrarySnapshot(result, yield* Clock.currentTimeMillis);
+    if (snapshot === null) {
+      return yield* new MusicError({ operation: "search-library", reason: "unavailable" });
+    }
+    libraryId = snapshot.playlistId;
+    return snapshot;
+  });
+
+  // Search, Favourites and Recently played share one read a minute, however many clients look.
+  const librarySnapshot = yield* Cache.makeWith((_: "library") => readLibrary(), {
+    capacity: 1,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? LIBRARY_SNAPSHOT_TTL : Duration.zero),
+  });
+  const library = (operation: MusicError["operation"]) =>
+    Cache.get(librarySnapshot, "library").pipe(
+      Effect.mapError((error) => new MusicError({ operation, reason: error.reason, cause: error })),
+    );
 
   const savedFiles = yield* store.load;
   if (savedFiles.body !== null) {
@@ -1396,21 +1491,14 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
           }
         : null,
     replaced: replaced?.info ?? null,
-    // Favourites and Recently played revisions arrive with those lists (Stage 3).
-    favouritesRevision: 0,
-    recentRevision: 0,
+    favouritesRevision,
+    recentRevision,
   });
   const queueStatus = yield* SubscriptionRef.make(statusOf());
-  /** Publishes transitions only, never a sample. */
-  const publishQueue = Effect.suspend(() => {
+  /** Publishes transitions only, never a sample. One step, so no later status is overwritten. */
+  const publishQueue = SubscriptionRef.updateSome(queueStatus, (current) => {
     const next = statusOf();
-    return SubscriptionRef.get(queueStatus).pipe(
-      Effect.flatMap((current) =>
-        JSON.stringify(current) === JSON.stringify(next)
-          ? Effect.void
-          : SubscriptionRef.set(queueStatus, next),
-      ),
-    );
+    return JSON.stringify(current) === JSON.stringify(next) ? Option.none() : Option.some(next);
   });
 
   const bodyOf = (state: QueueState): MusicQueueStore.QueueBody =>
@@ -1546,8 +1634,14 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     (parts) => `q${parts.map((part) => part.toString(36).padStart(6, "0")).join("")}`,
   );
 
-  /** A new T3 play: a new queue. An edited one it replaces is held briefly for Undo. */
-  const startQueue = Effect.fn("MusicPlayer.startQueue")(function* (pick: PickedSong) {
+  /**
+   * A new T3 play: a new queue, by formula for a playlist or explicit for a list. An edited one
+   * it replaces is held briefly for Undo.
+   */
+  const startQueue = Effect.fn("MusicPlayer.startQueue")(function* (
+    pick: PickedSong,
+    list?: (id: string) => MusicQueue.ExplicitQueue,
+  ) {
     const now = yield* Clock.currentTimeMillis;
     const id = yield* newQueueId;
     const old = queue;
@@ -1578,18 +1672,40 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     }
     forgetPending();
     unavailableKeys = new Set();
-    const sourceName = sourceNameFor(pick.playlistId);
+    const explicit = list?.(id) ?? null;
+    if (explicit === null) {
+      const sourceName = sourceNameFor(pick.playlistId);
+      return yield* commit(
+        {
+          id,
+          revision: 0,
+          active: true,
+          explicit: null,
+          formula: formulaOf(pick),
+          currentKey: `s${pick.index}`,
+          trackId: pick.trackId,
+          positionSec: 0,
+          display: sourceName === undefined ? {} : { sourceName },
+          sourceMissing: false,
+        },
+        "body",
+      );
+    }
+    const value = MusicQueue.currentValue(explicit);
+    const song = MusicQueue.songForValue(explicit, value)!;
+    const sourceName =
+      explicit.source.kind === "playlist" ? undefined : LIST_LABELS[explicit.source.kind];
     yield* commit(
       {
         id,
-        revision: 0,
+        revision: explicit.revision,
         active: true,
-        explicit: null,
-        formula: formulaOf(pick),
-        currentKey: `s${pick.index}`,
-        trackId: pick.trackId,
+        explicit,
+        formula: null,
+        currentKey: MusicQueue.entryKey(value),
+        trackId: song.trackId,
         positionSec: 0,
-        display: sourceName === undefined ? {} : { sourceName },
+        display: entryDisplay(sourceName === undefined ? {} : { sourceName }, song),
         sourceMissing: false,
       },
       "body",
@@ -1833,6 +1949,51 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       }),
     );
 
+  /** A song heard long enough moves to the top of Recently played. */
+  const observeRecent = Effect.fnUntraced(function* (
+    previous: EmittedMusicState | null,
+    state: MusicPlayerState,
+    now: number,
+  ) {
+    const followed = followRecentPlay(recentPlay, previous, state, now, MAX_CREDIT_SECONDS);
+    recentPlay = followed.play;
+    if (followed.qualified === null) return;
+    yield* recent.record(followed.qualified);
+    recentRevision++;
+    yield* publishQueue;
+  });
+
+  /** A favourite changed in Music itself makes the next Favourites read start fresh. */
+  const observeFavorite = Effect.fnUntraced(function* (state: MusicPlayerState, now: number) {
+    const track = state._tag === "ready" && state.playback !== "stopped" ? state.track : null;
+    if (track === null || track.favorited === undefined) return;
+    const value = track.favorited;
+    const write = favoriteWrite;
+    if (write !== null && write.trackId === track.id) {
+      if (value !== write.value && now < write.deadline) return;
+      favoriteWrite = null;
+    }
+    const seen = favoriteSeen;
+    favoriteSeen = { trackId: track.id, value };
+    if (seen === null || seen.trackId !== track.id || seen.value === value) return;
+    if (write !== null && write.trackId === track.id && write.value === value) return;
+    yield* Cache.invalidate(librarySnapshot, "library");
+    favouritesRevision++;
+    yield* publishQueue;
+  });
+
+  /** T3 changed a favourite: patch the shared read in place instead of reading it again. */
+  const noteFavoriteWrite = Effect.fnUntraced(function* (trackId: string, value: boolean) {
+    favoriteWrite = { trackId, value, deadline: (yield* Clock.currentTimeMillis) + PICK_SETTLE_MS };
+    const cached = yield* Cache.getSuccess(librarySnapshot, "library");
+    if (Option.isSome(cached) && cached.value.favorited !== null) {
+      if (value) cached.value.favorited.add(trackId);
+      else cached.value.favorited.delete(trackId);
+    }
+    favouritesRevision++;
+    yield* publishQueue;
+  });
+
   // Per-sample work, about once a second while anyone watches; the watcher run owns the span.
   const update = Effect.fnUntraced(function* (sample: MusicPlayerState, version = sampleVersion) {
     const state = yield* followSample(sample, version);
@@ -1841,6 +2002,8 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         yield* Ref.set(seekSinceSample, null);
+        yield* observeRecent(yield* Ref.get(lastSample), state, now);
+        yield* observeFavorite(state, now);
         yield* creditSample(state, now);
         yield* Ref.set(latest, Option.some(state));
         if (!musicStateChanged(yield* Ref.get(lastEmitted), state, now)) return;
@@ -1908,9 +2071,16 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     runWatcherOnce().pipe(Effect.andThen(Effect.sleep(WATCH_RESTART_DELAY))),
   ).pipe(
     Effect.raceFirst(
-      Effect.forever(Effect.sleep(STATS_FLUSH_INTERVAL).pipe(Effect.andThen(listening.flush))),
+      Effect.forever(
+        Effect.sleep(STATS_FLUSH_INTERVAL).pipe(
+          Effect.andThen(listening.flush),
+          Effect.andThen(recent.flush),
+        ),
+      ),
     ),
-    Effect.ensuring(Ref.set(lastSample, null).pipe(Effect.andThen(listening.flush))),
+    Effect.ensuring(
+      Ref.set(lastSample, null).pipe(Effect.andThen(listening.flush), Effect.andThen(recent.flush)),
+    ),
   );
 
   const retain = subscriberLock.withPermits(1)(
@@ -2075,27 +2245,6 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     yield* startQueue(pick);
   }, pickLock.withPermits(1));
 
-  const readLibrary = Effect.fn("MusicPlayer.readLibrary")(function* () {
-    const result = yield* runScript(
-      "search-library",
-      "JavaScript",
-      LIBRARY_SCRIPT,
-      [],
-      MAX_LIBRARY_BYTES,
-    );
-    const snapshot = decodeLibrarySnapshot(result);
-    if (snapshot === null) {
-      return yield* new MusicError({ operation: "search-library", reason: "unavailable" });
-    }
-    libraryId = snapshot.playlistId;
-    return snapshot;
-  });
-
-  const librarySnapshot = yield* Cache.makeWith((_: "library") => readLibrary(), {
-    capacity: 1,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? LIBRARY_SNAPSHOT_TTL : Duration.zero),
-  });
-
   const searchLibrary = Effect.fn("MusicPlayer.searchLibrary")(function* (
     input: MusicSearchLibraryInput,
   ) {
@@ -2223,7 +2372,10 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       resetAck !== null &&
       !resetAck.confirmed &&
       resetAck.revision === queue?.revision;
-    yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
+    const result = yield* runScript("control", "JavaScript", CONTROL_SCRIPT, controlArgs(input));
+    if (input._tag === "set-favorited" && result === "ok") {
+      yield* noteFavoriteWrite(input.trackId, input.favorited);
+    }
     if (input._tag === "set-shuffle") {
       if (explicitShuffle) {
         if (!retryReset) {
@@ -2628,11 +2780,9 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
           };
     });
     const label =
-      explicit.source.kind === "favourites"
-        ? "Favourites"
-        : explicit.source.kind === "recent"
-          ? "Recently played"
-          : text(read.playlistName) || (state.display.sourceName ?? "Playlist");
+      explicit.source.kind === "playlist"
+        ? text(read.playlistName) || (state.display.sourceName ?? "Playlist")
+        : LIST_LABELS[explicit.source.kind];
     return {
       id: state.id,
       revision: state.revision,
@@ -2787,6 +2937,147 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     return { id: hold.held.id, revision: hold.held.revision } satisfies MusicQueueRef;
   }, pickLock.withPermits(1));
 
+  const listOperation = (source: MusicPlayListInput["source"]) =>
+    source === "favourites" ? ("favorites" as const) : ("recent" as const);
+
+  /** The list as the server holds it now, by library position; rows gone from it are left out. */
+  const listSongs = Effect.fn("MusicPlayer.listSongs")(function* (
+    source: MusicPlayListInput["source"],
+  ) {
+    const operation = listOperation(source);
+    const snapshot = yield* library(operation);
+    const meta = (song: MusicLibrarySong) => ({
+      name: song.name,
+      artist: song.artist,
+      durationSec: song.durationSec,
+    });
+    if (source === "favourites") {
+      const favorited = snapshot.favorited;
+      if (favorited === null) return yield* new MusicError({ operation, reason: "unavailable" });
+      return snapshot.entries.flatMap(({ song }): Array<MusicQueue.QueueSong> =>
+        favorited.has(song.id)
+          ? [
+              {
+                playlistId: snapshot.playlistId,
+                trackId: song.id,
+                index: song.index,
+                meta: meta(song),
+              },
+            ]
+          : [],
+      );
+    }
+    return (yield* recent.list).flatMap((row): Array<MusicQueue.QueueSong> => {
+      const entry = snapshot.byId.get(row.trackId);
+      return entry === undefined
+        ? []
+        : [
+            {
+              playlistId: snapshot.playlistId,
+              trackId: row.trackId,
+              index: entry.song.index,
+              meta: { name: row.name, artist: row.artist, durationSec: row.durationSec },
+            },
+          ];
+    });
+  });
+
+  /** Plays a row of Favourites or Recently played and carries on through that list. */
+  const playList = Effect.fn("MusicPlayer.playList")(function* (input: MusicPlayListInput) {
+    const operation = listOperation(input.source);
+    const original = yield* listSongs(input.source);
+    if (original.length > MusicQueue.MAX_QUEUE_ENTRIES) {
+      return yield* new MusicError({ operation: "queue", reason: "queue-too-long" });
+    }
+    const latestState = Option.getOrNull(yield* Ref.get(latest));
+    // Like a playlist, an omitted shuffle follows Music's setting; Music's own flag is not written.
+    const shuffle =
+      input.shuffle ??
+      (latestState?._tag === "ready" && latestState.playback !== "stopped" && latestState.shuffle);
+    const start =
+      input.startTrackId === null
+        ? shuffle && original.length > 0
+          ? yield* Random.nextIntBetween(0, original.length - 1)
+          : 0
+        : original.findIndex((song) => song.trackId === input.startTrackId);
+    const first = original[start];
+    if (first === undefined) return yield* new MusicError({ operation, reason: "not-found" });
+    const result = yield* runScript(operation, "JavaScript", PLAY_TRACK_SCRIPT, [
+      first.playlistId,
+      first.trackId,
+      String(first.index),
+    ]);
+    if (result === "not-found") return yield* new MusicError({ operation, reason: "not-found" });
+    sampleVersion++;
+    const played = Number(result.split(":")[1]);
+    const seed = yield* newSeed;
+    const pick = pickSong(
+      first.playlistId,
+      first.trackId,
+      Number.isInteger(played) ? played : first.index,
+      yield* Clock.currentTimeMillis,
+      seed,
+    );
+    yield* Ref.set(picked, pick);
+    yield* startQueue(pick, (id) =>
+      MusicQueue.fromList({
+        id,
+        kind: input.source,
+        original,
+        start,
+        shuffleSeed: shuffle ? seed : null,
+      }),
+    );
+  }, pickLock.withPermits(1));
+
+  const listFavorites = Effect.fn("MusicPlayer.listFavorites")(function* (
+    input: MusicListFavoritesInput,
+  ) {
+    const page = listFavoriteSongs(yield* library("favorites"), input);
+    if (page === null) {
+      return yield* new MusicError({ operation: "favorites", reason: "unavailable" });
+    }
+    return page;
+  });
+
+  const setTrackFavorited = Effect.fn("MusicPlayer.setTrackFavorited")(function* (
+    input: MusicSetTrackFavoritedInput,
+  ) {
+    const result = yield* runScript("favorites", "JavaScript", FAVORITE_TRACK_SCRIPT, [
+      input.trackId,
+      String(input.favorited),
+    ]);
+    if (result !== "ok") {
+      return yield* new MusicError({ operation: "favorites", reason: "not-found" });
+    }
+    yield* noteFavoriteWrite(input.trackId, input.favorited);
+  });
+
+  const listRecent = Effect.fn("MusicPlayer.listRecent")(function* (input: MusicListRecentInput) {
+    const songs = yield* recent.list;
+    // Rows show without the library; they only need it to play.
+    const snapshot =
+      songs.length === 0 ? null : Option.getOrNull(yield* Effect.option(library("recent")));
+    return {
+      playlistId: snapshot?.playlistId ?? null,
+      songs: songs.slice(input.offset, input.offset + input.limit).map((song) => ({
+        ...song,
+        index: snapshot?.byId.get(song.trackId)?.song.index ?? null,
+      })),
+      total: songs.length,
+    } satisfies MusicRecent;
+  });
+
+  const clearRecent = recent.clear.pipe(
+    Effect.andThen(
+      Effect.suspend(() => {
+        recentRevision++;
+        return publishQueue;
+      }),
+    ),
+    Effect.withSpan("MusicPlayer.clearRecent"),
+  );
+
   return MusicPlayer.of({
     stateStream,
     listPlaylists,
@@ -2823,12 +3114,13 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     undoReplace,
     resumeQueue,
     dismissSavedQueue,
-    // Stage 3: playing from Favourites and Recently played, and those lists.
-    playList: notYet("queue"),
-    listFavorites: notYet("favorites"),
-    setTrackFavorited: notYet("favorites"),
-    listRecent: notYet("recent"),
-    clearRecent: Effect.fail(new MusicError({ operation: "recent", reason: "unavailable" })),
+    playList,
+    listFavorites,
+    setTrackFavorited,
+    listRecent,
+    clearRecent: supported
+      ? clearRecent
+      : Effect.fail(new MusicError({ operation: "recent", reason: "unsupported" })),
   });
 });
 

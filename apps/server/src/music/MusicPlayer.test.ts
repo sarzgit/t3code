@@ -18,6 +18,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as MusicListeningStats from "./MusicListeningStats.ts";
 import * as MusicPlayer from "./MusicPlayer.ts";
 import * as MusicQueueStore from "./MusicQueueStore.ts";
+import * as MusicRecent from "./MusicRecent.ts";
 
 const output = (
   overrides: Partial<ProcessRunner.ProcessRunOutput> = {},
@@ -97,10 +98,12 @@ const providePlayer = (
   platform: NodeJS.Platform = "darwin",
   upNextHelper = "/nonexistent/T3 Music Up Next.app",
   queueStore: Layer.Layer<MusicQueueStore.MusicQueueStore> = MusicQueueStore.layerMemory(),
+  recent: Layer.Layer<MusicRecent.MusicRecent> = MusicRecent.layerMemory(),
 ) =>
   Effect.provide(
     MusicPlayer.layerWith({ upNextHelper }).pipe(
       Layer.provideMerge(queueStore),
+      Layer.provide(recent),
       Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
       Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
       Layer.provide(MusicListeningStats.layerMemory),
@@ -127,6 +130,8 @@ const VIDEO = "9999999999999999";
 interface FakeSong {
   readonly id: string;
   readonly kind?: string;
+  /** Left out everywhere, the library has no favourite column, like a Music that can't say. */
+  readonly favorited?: boolean;
 }
 
 /** A Music app for scripts run in a VM. Like the real one, library `tracks[i]` is not bulk entry i. */
@@ -171,7 +176,11 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
         mediaKind: column((song) => song.kind ?? "song"),
         name: column((song) => `name ${song.id}`),
         artist: column(() => "Artist"),
+        album: column(() => "Album"),
         duration: column(() => 200),
+        ...(songs.some((song) => song.favorited !== undefined)
+          ? { favorited: column((song) => song.favorited === true) }
+          : {}),
         whose: (query: { readonly persistentID: string }) => () =>
           songs
             .filter((song) => song.id === query.persistentID)
@@ -1845,6 +1854,292 @@ describe("MusicPlayer queue", () => {
           [6, ["s3", "s4", "s5"]],
         );
       }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+});
+
+const isLibraryRead = (args: ReadonlyArray<string>) => args[4]!.includes("favoritedColumn(");
+const libraryReads = (calls: Ref.Ref<ReadonlyArray<ReadonlyArray<string>>>) =>
+  Ref.get(calls).pipe(Effect.map((all) => all.filter(isLibraryRead).length));
+
+describe("MusicPlayer favourites and recently played", () => {
+  it.effect("records songs heard while only an agent watches, and Clear empties them", () =>
+    Effect.gen(function* () {
+      const fake = fakeMusic({ [LIBRARY_ID]: [{ id: VIDEO, kind: "video" }, { id: SONG_A }] });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        yield* player.observeAgents(
+          {
+            requestIds: new Set(),
+            workingProjectIds: new Set(["project-1"]),
+            preexisting: new Set<string>(),
+          },
+          "off",
+        );
+        const session = yield* Queue.take(sessions);
+        const listen = (track: Record<string, unknown>, seconds: number) =>
+          Effect.gen(function* () {
+            for (let position = 0; position <= seconds; position += 5) {
+              session.emit(sampleLine({ state: "playing", position, track }));
+              yield* TestClock.adjust("5 seconds");
+            }
+          });
+        const song = {
+          id: SONG_A,
+          name: "Été: Live",
+          artist: "Ärtist",
+          album: "Al",
+          duration: 200,
+        };
+        yield* listen(song, 25);
+        assert.strictEqual((yield* player.listRecent({ offset: 0, limit: 100 })).total, 0);
+        yield* listen(song, 30);
+        yield* until(statuses, (status) => status.recentRevision === 1);
+        // A song no longer in the library still lists, with no place to play it from.
+        const gone = { id: SONG_C, name: "Gone", artist: "Band", album: "", duration: 40 };
+        yield* listen(gone, 20);
+        yield* until(statuses, (status) => status.recentRevision === 2);
+        const listed = yield* player.listRecent({ offset: 0, limit: 100 });
+        assert.deepStrictEqual(
+          listed.songs.map((row) => ({ ...row, lastPlayedAt: 0 })),
+          [
+            {
+              trackId: SONG_C,
+              name: "Gone",
+              artist: "Band",
+              album: "",
+              durationSec: 40,
+              lastPlayedAt: 0,
+              index: null,
+            },
+            {
+              trackId: SONG_A,
+              name: "Été: Live",
+              artist: "Ärtist",
+              album: "Al",
+              durationSec: 200,
+              lastPlayedAt: 0,
+              index: 0,
+            },
+          ],
+        );
+        assert.strictEqual(listed.playlistId, LIBRARY_ID);
+        assert.deepStrictEqual(
+          (yield* player.listRecent({ offset: 1, limit: 1 })).songs.map((row) => row.trackId),
+          [SONG_A],
+        );
+        // Recording rides on the one watcher.
+        assert.strictEqual(yield* Queue.size(sessions), 0);
+
+        yield* player.clearRecent;
+        yield* until(statuses, (status) => status.recentRevision === 3);
+        assert.deepStrictEqual((yield* player.listRecent({ offset: 0, limit: 100 })).songs, []);
+        const stats = yield* player.stats({ days: 1 });
+        assert.isAbove(stats.totalSec, 0);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("lists favourites from the shared library read and patches T3's own changes", () =>
+    Effect.gen(function* () {
+      const songs = [
+        { id: SONG_A, favorited: true },
+        { id: VIDEO, kind: "video", favorited: true },
+        { id: SONG_B, favorited: false },
+        { id: SONG_C, favorited: true },
+      ];
+      const fake = fakeMusic({ [LIBRARY_ID]: songs });
+      const { calls, sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const ids = (input: { query?: string; offset?: number; limit?: number }) =>
+          player
+            .listFavorites({ offset: input.offset ?? 0, limit: input.limit ?? 100, ...input })
+            .pipe(Effect.map((page) => [page.songs.map((song) => song.id), page.total] as const));
+        assert.deepStrictEqual(yield* ids({}), [[SONG_A, SONG_C], 2]);
+        assert.deepStrictEqual(yield* ids({ query: `NAME ${SONG_C}` }), [[SONG_C], 1]);
+        assert.deepStrictEqual(yield* ids({ offset: 1, limit: 1 }), [[SONG_C], 2]);
+        const first = yield* player.listFavorites({ offset: 0, limit: 100 });
+        assert.deepStrictEqual(
+          [first.playlistId, first.songs.map((song) => song.index)],
+          [LIBRARY_ID, [0, 2]],
+        );
+        // Search shares the same read.
+        yield* player.searchLibrary({ query: "name" });
+        assert.strictEqual(yield* libraryReads(calls), 1);
+
+        yield* player.setTrackFavorited({ trackId: SONG_A, favorited: false });
+        assert.deepStrictEqual((yield* Ref.get(calls)).at(-1)!.slice(5), [SONG_A, "false"]);
+        yield* until(statuses, (status) => status.favouritesRevision === 1);
+        const patched = yield* player.listFavorites({ offset: 0, limit: 100 });
+        assert.deepStrictEqual(
+          patched.songs.map((song) => song.id),
+          [SONG_C],
+        );
+        assert.strictEqual(patched.snapshotAt, first.snapshotAt);
+        assert.strictEqual(yield* libraryReads(calls), 1);
+        const missing = yield* Effect.flip(
+          player.setTrackFavorited({ trackId: "FFFF000000000000", favorited: true }),
+        );
+        assert.strictEqual(missing.reason, "not-found");
+
+        // T3's heart on the current song: samples read before the write are not Music's change.
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        const current = (favorited: boolean, position: number) =>
+          sampleLine({
+            state: "playing",
+            position,
+            track: { id: SONG_C, duration: 200, favorited },
+          });
+        fake.player.current = SONG_C;
+        session.emit(current(true, 1));
+        yield* Queue.take(received);
+        yield* player.control({ _tag: "set-favorited", trackId: SONG_C, favorited: false });
+        yield* until(statuses, (status) => status.favouritesRevision === 2);
+        session.emit(current(true, 2));
+        session.emit(current(false, 3));
+        yield* until(
+          received,
+          (state) => state._tag === "ready" && state.track?.favorited === false,
+        );
+        assert.deepStrictEqual(yield* ids({}), [[], 0]);
+        assert.strictEqual(yield* libraryReads(calls), 1);
+
+        // Favourited in Music itself: the next list reads the library again, from the top.
+        yield* TestClock.adjust("10 seconds");
+        session.emit(current(true, 13));
+        const external = yield* until(statuses, (status) => status.favouritesRevision === 3);
+        assert.strictEqual(external.favouritesRevision, 3);
+        const reread = yield* player.listFavorites({ offset: 0, limit: 100 });
+        assert.strictEqual(yield* libraryReads(calls), 2);
+        assert.notStrictEqual(reread.snapshotAt, first.snapshotAt);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("keeps search working when Music can't report favourites", () =>
+    Effect.gen(function* () {
+      const fake = fakeMusic({ [LIBRARY_ID]: [{ id: SONG_A }] });
+      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const failed = yield* Effect.flip(player.listFavorites({ offset: 0, limit: 100 }));
+        assert.deepStrictEqual([failed.operation, failed.reason], ["favorites", "unavailable"]);
+        assert.strictEqual((yield* player.searchLibrary({ query: "name" })).total, 1);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("plays from Favourites as a T3 queue that continues through the list", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(4).map((song, i) => ({ ...song, favorited: i !== 1 }));
+      const fake = fakeMusic({ [LIBRARY_ID]: songs });
+      const { calls, sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playList({ source: "favourites", startTrackId: songs[2]!.id });
+        assert.strictEqual(fake.played.at(-1), songs[2]!.id);
+        const active = (yield* until(statuses, (status) => status.active !== null)).active!;
+        assert.deepStrictEqual(
+          { revision: active.revision, edited: active.edited, currentKey: active.currentKey },
+          { revision: 0, edited: true, currentKey: "s1" },
+        );
+        session.emit(playingSample(songs[2]!.id));
+        yield* Queue.take(received);
+        const view = yield* player.getQueue({ queueId: active.id });
+        assert.deepStrictEqual(
+          [view.sourceName, view.current?.trackId, view.upcoming.map((entry) => entry.trackId)],
+          ["Favourites", songs[2]!.id, [songs[3]!.id]],
+        );
+
+        // Clear, then Reset brings back the list as it was played.
+        yield* player.editQueue({
+          queueId: active.id,
+          expectedRevision: 0,
+          edit: { _tag: "clear-upcoming" },
+        });
+        yield* player.editQueue({
+          queueId: active.id,
+          expectedRevision: 1,
+          edit: { _tag: "reset" },
+        });
+        const reset = yield* player.getQueue({ queueId: active.id });
+        assert.deepStrictEqual(
+          reset.upcoming.map((entry) => entry.key),
+          ["s2"],
+        );
+        yield* player.control({ _tag: "previous" });
+        yield* player.control({ _tag: "next" });
+        assert.strictEqual(fake.played.at(-1), songs[3]!.id);
+        yield* until(statuses, (status) => status.active?.currentKey === "s2");
+
+        // A shuffled play of the whole list replaces it; the edited queue is held for Undo.
+        yield* player.playList({ source: "favourites", startTrackId: null, shuffle: true });
+        const shuffled = yield* until(statuses, (status) => status.replaced !== null);
+        assert.strictEqual(shuffled.replaced!.replacedId, active.id);
+        const whole = yield* player.getQueue({ queueId: shuffled.active!.id });
+        assert.deepStrictEqual(
+          [whole.shuffled, whole.totalUpcoming, whole.edited],
+          [true, 2, true],
+        );
+        assert.sameMembers(
+          [whole.current!.trackId, ...whole.upcoming.map((entry) => entry.trackId)],
+          [songs[0]!.id, songs[2]!.id, songs[3]!.id],
+        );
+        // Music's own shuffle setting is never written for a list.
+        assert.isFalse((yield* Ref.get(calls)).some((args) => args.at(-1) === "shuffle-on"));
+
+        const gone = yield* Effect.flip(
+          player.playList({ source: "favourites", startTrackId: songs[1]!.id }),
+        );
+        assert.deepStrictEqual([gone.operation, gone.reason], ["favorites", "not-found"]);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("plays from Recently played, skipping songs gone from the library", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(3);
+      const fake = fakeMusic({ [LIBRARY_ID]: songs });
+      const { runner } = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+      const row = (trackId: string, lastPlayedAt: number) => ({
+        trackId,
+        name: `Saved ${trackId}`,
+        artist: "Artist",
+        album: "Album",
+        durationSec: 180,
+        lastPlayedAt,
+      });
+      const recent = MusicRecent.layerMemory([
+        row(songs[2]!.id, 3),
+        row("FFFF000000000009", 2),
+        row(songs[0]!.id, 1),
+      ]);
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        yield* player.playList({ source: "recent", startTrackId: songs[2]!.id });
+        assert.strictEqual(fake.played.at(-1), songs[2]!.id);
+        const active = (yield* until(statuses, (status) => status.active !== null)).active!;
+        const view = yield* player.getQueue({ queueId: active.id });
+        assert.deepStrictEqual(
+          [view.sourceName, view.upcoming.map((entry) => [entry.trackId, entry.name])],
+          ["Recently played", [[songs[0]!.id, `Saved ${songs[0]!.id}`]]],
+        );
+      }).pipe(providePlayer(runner, "darwin", undefined, undefined, recent), Effect.scoped);
     }),
   );
 });

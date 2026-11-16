@@ -22,6 +22,9 @@ const fixture = vi.hoisted(() => ({
   refs: [] as Array<{ readonly id: string; readonly revision: number }>,
   /** Set by the mock; refreshing it publishes `status` like the server's stream. */
   statusAtom: null as unknown,
+  /** Favourites and Recently played pages by input, read again on each refresh. */
+  favorites: (_input: { offset: number; limit: number }): unknown => null,
+  recent: (_input: { offset: number; limit: number }): unknown => null,
 }));
 
 function setup(status: MusicQueueStatus, view: MusicQueueView | null) {
@@ -49,6 +52,18 @@ vi.mock(import("../../state/music"), async () => {
   });
   const statusAtom = A.make(() => Result.success(fixture.status as MusicQueueStatus));
   fixture.statusAtom = statusAtom;
+  const byInput = (read: (input: never) => unknown) => {
+    const atoms = new Map<string, unknown>();
+    return (target: { readonly input: never }) => {
+      const key = JSON.stringify(target.input);
+      if (!atoms.has(key))
+        atoms.set(
+          key,
+          A.make(() => Result.success(read(target.input))),
+        );
+      return atoms.get(key);
+    };
+  };
   const viewAtom = A.make(() => {
     fixture.viewReads += 1;
     return Result.success(fixture.view as MusicQueueView);
@@ -76,6 +91,11 @@ vi.mock(import("../../state/music"), async () => {
       resumeQueue: command("resumeQueue"),
       dismissSavedQueue: command("dismissSavedQueue"),
       undoReplace: command("undoReplace"),
+      playList: command("playList"),
+      setTrackFavorited: command("setTrackFavorited"),
+      clearRecent: command("clearRecent"),
+      favorites: byInput((input) => fixture.favorites(input)),
+      recent: byInput((input) => fixture.recent(input)),
     } as never,
     useMusicQueueStatus: (() => useEnvironmentQuery(statusAtom).data) as never,
   };
@@ -306,4 +326,122 @@ it("offers the saved queue by id and revision, and only Dismiss once its playlis
   await expect
     .element(screen.getByRole("button", { name: "Resume Saved song" }))
     .not.toBeInTheDocument();
+});
+
+const callsOf = (tag: string) =>
+  fixture.calls.filter((call) => call.tag === tag).map((call) => call.input);
+
+const libraryId = "0000000000000005";
+const favorite = (i: number) => ({
+  id: `FAFA${String(i).padStart(12, "0")}`,
+  index: i * 2,
+  name: `Fav ${i}`,
+  artist: "Band",
+  album: "Album",
+  durationSec: 200,
+});
+
+it("pages Favourites, plays from them and restarts when the library read changes", async () => {
+  setup(status(), formulaView);
+  let snapshotAt = 1;
+  fixture.favorites = ({ offset, limit }) => ({
+    playlistId: libraryId,
+    songs: Array.from({ length: Math.max(0, Math.min(limit, 150 - offset)) }, (_, i) =>
+      favorite(offset + i),
+    ),
+    total: 150,
+    snapshotAt,
+  });
+  using add = vi.spyOn(toastManager, "add");
+  const registry = AtomRegistry.make();
+  await using screen = await renderPanel(registry, playing());
+  await userEvent.click(screen.getByRole("button", { name: "Favourites" }));
+
+  await expect.element(screen.getByText("Fav 99")).toBeInTheDocument();
+  await expect.element(screen.getByText("Fav 120")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Show more" }));
+  await expect.element(screen.getByText("Fav 120")).toBeInTheDocument();
+  await expect.element(screen.getByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: /^Fav 1\D/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Shuffle" }));
+  await vi.waitFor(() =>
+    expect(callsOf("playList")).toEqual([
+      { source: "favourites", startTrackId: favorite(1).id },
+      { source: "favourites", startTrackId: null, shuffle: true },
+    ]),
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "More for Fav 0" }));
+  await userEvent.click(page.getByRole("menuitem", { name: "Unfavourite" }));
+  await vi.waitFor(() => expect(add).toHaveBeenCalled());
+  const toast = add.mock.calls.at(-1)![0];
+  expect(toast.title).toBe("Removed from Favourites");
+  const undoFavourite = toast.actionProps?.onClick as (() => void) | undefined;
+  expect(undoFavourite).toBeDefined();
+  await act(() => undoFavourite!());
+  await vi.waitFor(() =>
+    expect(callsOf("setTrackFavorited")).toEqual([
+      { trackId: favorite(0).id, favorited: false },
+      { trackId: favorite(0).id, favorited: true },
+    ]),
+  );
+
+  // Music's library was read again: Show more pages from the old read go.
+  snapshotAt = 2;
+  await publish(registry, status({ favouritesRevision: 1 }));
+  await expect.element(screen.getByText("Fav 120")).not.toBeInTheDocument();
+  await expect.element(screen.getByText("Fav 0")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "Back to playlists" }));
+  await vi.waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Favourites" }).element(),
+    ),
+  );
+});
+
+it("shows Recently played with gone songs disabled, and clears only after confirming", async () => {
+  setup(status(), formulaView);
+  const rows = [
+    {
+      trackId: SONG,
+      name: "Kept",
+      artist: "Band",
+      album: "Live",
+      durationSec: 200,
+      lastPlayedAt: 2,
+      index: 4,
+    },
+    {
+      trackId: "DDDD000000000004",
+      name: "Gone",
+      artist: "Band",
+      album: "",
+      durationSec: 90,
+      lastPlayedAt: 1,
+      index: null,
+    },
+  ];
+  let shown = rows;
+  fixture.recent = () => ({ playlistId: libraryId, songs: shown, total: shown.length });
+  const registry = AtomRegistry.make();
+  await using screen = await renderPanel(registry, playing({ track: null }));
+  await userEvent.click(screen.getByRole("button", { name: "Recently played" }));
+
+  await expect.element(screen.getByRole("button", { name: /^Gone/ })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: /^Kept/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(callsOf("clearRecent")).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
+  await userEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
+  await vi.waitFor(() => expect(callsOf("clearRecent")).toEqual([{}]));
+  expect(callsOf("playList")).toEqual([{ source: "recent", startTrackId: SONG }]);
+
+  shown = [];
+  await publish(registry, status({ recentRevision: 1 }));
+  await expect
+    .element(screen.getByText("Songs you play while T3 Code is running show here."))
+    .toBeInTheDocument();
 });

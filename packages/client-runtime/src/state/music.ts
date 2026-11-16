@@ -304,6 +304,17 @@ export function musicQueueEditBase(
   };
 }
 
+/**
+ * Pages a Favourites view shows. Pages opened with Show more hold only while the first page
+ * still comes from the same library read; a new read starts again from the top.
+ */
+export function musicListPages(
+  pages: { readonly count: number; readonly snapshotAt: number | null },
+  firstSnapshotAt: number | null,
+): number {
+  return pages.count > 1 && pages.snapshotAt === firstSnapshotAt ? pages.count : 1;
+}
+
 export function nextRepeatMode(mode: MusicRepeatMode): MusicRepeatMode {
   return mode === "off" ? "all" : mode === "all" ? "one" : "off";
 }
