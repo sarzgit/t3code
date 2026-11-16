@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { PlayIcon } from "lucide-react";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
+import { musicGlobalShortcutHolding } from "@t3tools/shared/musicGlobalShortcuts";
 import * as Cause from "effect/Cause";
 import { useContext, useRef, useState } from "react";
 
@@ -19,6 +20,7 @@ import {
   readSnapShotSetupResume,
 } from "../../lib/snapShotSetupResume";
 import { sameSnapShotShortcut, snapShotKeybindingConflict } from "../../lib/snapShotShortcut";
+import { isMacPlatform } from "../../lib/utils";
 import { playSnapShotSound } from "../../lib/snapShotSound";
 import {
   desktopSnapShotAtom,
@@ -87,6 +89,8 @@ export function SnapShotSettings() {
     snapShotPlaySound: current.snapShotPlaySound,
     snapShotShortcut: current.snapShotShortcut,
     snapShotSound: current.snapShotSound,
+    musicGlobalShortcuts: current.musicGlobalShortcuts,
+    musicPlayerEnabled: current.musicPlayerEnabled,
   }));
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const bridge = getDesktopSnapShotBridge();
@@ -143,8 +147,21 @@ export function SnapShotSettings() {
   const candidateConflict = shortcutChanged
     ? snapShotKeybindingConflict(candidate, keybindings)
     : null;
+  // Only an active music key holds; while off, the music settings show the clash instead.
+  const musicHolder = (shortcut: SnapShotShortcut) =>
+    settings.musicPlayerEnabled && settings.musicGlobalShortcuts.enabled
+      ? musicGlobalShortcutHolding(
+          shortcut,
+          settings.musicGlobalShortcuts.bindings,
+          isMacPlatform(navigator.platform),
+        )
+      : null;
+  const candidateMusicConflict = shortcutChanged ? musicHolder(candidate) : null;
   const canSaveShortcut =
-    shortcutChanged && candidateConflict === null && shortcutCheck.availability?.available === true;
+    shortcutChanged &&
+    candidateConflict === null &&
+    candidateMusicConflict === null &&
+    shortcutCheck.availability?.available === true;
   const soundSelection = settings.snapShotPlaySound ? settings.snapShotSound : "off";
   const soundLabel =
     soundSelection === "off" ? "Off" : soundSelection === "soft-pop" ? "Whoosh (Default)" : "Click";
@@ -207,7 +224,7 @@ export function SnapShotSettings() {
   const checkShortcut = async (shortcut: SnapShotShortcut) => {
     const checkId = ++shortcutCheckIdRef.current;
     setCandidate(shortcut);
-    const conflict = snapShotKeybindingConflict(shortcut, keybindings);
+    const conflict = snapShotKeybindingConflict(shortcut, keybindings) ?? musicHolder(shortcut);
     if (conflict || !bridge) return;
     setShortcutCheck({ status: "checking", availability: null, shortcut, savedShortcut });
     try {
@@ -256,17 +273,19 @@ export function SnapShotSettings() {
     ? "Press your shortcut. Esc cancels."
     : candidateConflict
       ? `T3 Code already uses this for "${commandLabel(candidateConflict)}".`
-      : shortcutCheck.status === "checking"
-        ? "Checking shortcut…"
-        : shortcutCheck.availability
-          ? shortcutCheck.availability.available
-            ? "Ready to save."
-            : shortcutCheck.availability.message
-          : state?.mode === "portal" &&
-              !state.shortcutLabel &&
-              isModifierPairShortcut(displayShortcut)
-            ? "Try a shortcut such as Ctrl+Shift+2."
-            : snapShotShortcutStatus(state);
+      : candidateMusicConflict
+        ? "A global music shortcut already uses this."
+        : shortcutCheck.status === "checking"
+          ? "Checking shortcut…"
+          : shortcutCheck.availability
+            ? shortcutCheck.availability.available
+              ? "Ready to save."
+              : shortcutCheck.availability.message
+            : state?.mode === "portal" &&
+                !state.shortcutLabel &&
+                isModifierPairShortcut(displayShortcut)
+              ? "Try a shortcut such as Ctrl+Shift+2."
+              : snapShotShortcutStatus(state);
 
   const openSetup = async (requested: CaptureSetupStep | "resume" = "resume") => {
     if (!state || setupBusy) return;

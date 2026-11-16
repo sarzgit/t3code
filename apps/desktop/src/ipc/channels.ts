@@ -145,3 +145,5 @@ export const MUSIC_MINI_PLAYER_CLOSE_CHANNEL = "desktop:music-mini-player-close"
 export const MUSIC_MINI_PLAYER_OPEN_MAIN_CHANNEL = "desktop:music-mini-player-open-main";
 export const MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL =
   "desktop:music-mini-player-settings-changed";
+export const MUSIC_GLOBAL_SHORTCUT_ACTION_CHANNEL = "desktop:music-shortcut";
+export const MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL = "desktop:music-shortcuts-get-status";

@@ -392,6 +392,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["music volume duck pause approval question agent"],
   },
   {
+    id: "music-global-shortcuts",
+    title: "Global music shortcuts",
+    to: "/settings/appearance",
+    searchTerms: ["keyboard hotkey play pause next previous favourite mini player"],
+    desktopOnly: true,
+    macOnly: true,
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",

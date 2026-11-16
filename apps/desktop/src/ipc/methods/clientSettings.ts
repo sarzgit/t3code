@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as MiniPlayerWindow from "../../music/MiniPlayerWindow.ts";
+import * as MusicGlobalShortcuts from "../../music/MusicGlobalShortcuts.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
 import * as DesktopSnapShot from "../../snapShot/DesktopSnapShot.ts";
 import * as IpcChannels from "../channels.ts";
@@ -27,6 +28,8 @@ export const setClientSettings = DesktopIpc.makeIpcMethod({
     const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
     const snapShot = yield* DesktopSnapShot.DesktopSnapShot;
     yield* clientSettings.set(settings);
+    // Music first: a key it gives up to Snap Shot must be free before Snap Shot registers it.
+    yield* (yield* MusicGlobalShortcuts.MusicGlobalShortcuts).configure(settings);
     yield* snapShot.configure(settings);
     yield* (yield* MiniPlayerWindow.MusicMiniPlayerWindow).configure(settings);
   }),

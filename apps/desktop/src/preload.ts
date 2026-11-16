@@ -7,12 +7,23 @@ import type {
   DesktopPreviewRecordingInputEvent,
   DesktopPreviewTabState,
   DesktopSnapShotEvent,
+  MusicGlobalShortcutAction,
 } from "@t3tools/contracts";
 import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 import { mergeLegacyLocalStorage } from "./legacyLocalStorageMerge.ts";
+
+const MUSIC_GLOBAL_SHORTCUT_ACTIONS: ReadonlySet<unknown> = new Set([
+  "playPause",
+  "next",
+  "previous",
+  "favorite",
+  "toggleMiniPlayer",
+] satisfies ReadonlyArray<MusicGlobalShortcutAction>);
+const isMusicGlobalShortcutAction = (value: unknown): value is MusicGlobalShortcutAction =>
+  MUSIC_GLOBAL_SHORTCUT_ACTIONS.has(value);
 
 const SNAP_SHOT_EVENT_TYPES = new Set([
   "requested",
@@ -386,6 +397,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.on(IpcChannels.MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL, handler);
       return () =>
         ipcRenderer.removeListener(IpcChannels.MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL, handler);
+    },
+  },
+  musicGlobalShortcuts: {
+    getStatus: () => ipcRenderer.invoke(IpcChannels.MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL),
+    onAction: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, action: unknown) => {
+        if (isMusicGlobalShortcutAction(action)) listener(action);
+      };
+      ipcRenderer.on(IpcChannels.MUSIC_GLOBAL_SHORTCUT_ACTION_CHANNEL, handler);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.MUSIC_GLOBAL_SHORTCUT_ACTION_CHANNEL, handler);
     },
   },
   preview: {

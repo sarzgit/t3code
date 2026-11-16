@@ -247,6 +247,10 @@
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
     },
+    "./musicGlobalShortcuts": {
+      "types": "./src/musicGlobalShortcuts.ts",
+      "import": "./src/musicGlobalShortcuts.ts"
+    },
     "./keybindingMatching": {
       "types": "./src/keybindingMatching.ts",
       "import": "./src/keybindingMatching.ts"

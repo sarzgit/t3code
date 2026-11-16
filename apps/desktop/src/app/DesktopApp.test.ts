@@ -39,6 +39,7 @@ import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as MiniPlayerWindow from "../music/MiniPlayerWindow.ts";
+import * as MusicGlobalShortcuts from "../music/MusicGlobalShortcuts.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -167,6 +168,9 @@ it.effect.each([false, true])(
           Effect.provideService(DesktopSnapShot.DesktopSnapShot, {
             initialize: Effect.void,
           } as DesktopSnapShot.DesktopSnapShot["Service"]),
+          Effect.provideService(MusicGlobalShortcuts.MusicGlobalShortcuts, {
+            initialize: Effect.void,
+          } as MusicGlobalShortcuts.MusicGlobalShortcuts["Service"]),
           Effect.provideService(DesktopState.DesktopState, {
             quitting,
           } as DesktopState.DesktopState["Service"]),
@@ -237,6 +241,7 @@ it.effect.each([false, true])(
             Layer.mock(ElectronWindow.ElectronWindow, {}),
             Layer.mock(MacPermissions.MacPermissions, {}),
             Layer.mock(MiniPlayerWindow.MusicMiniPlayerWindow, {}),
+            Layer.mock(MusicGlobalShortcuts.MusicGlobalShortcuts, {}),
             Layer.mock(PreviewManager.PreviewManager, {
               isBrowserPartition: () => {
                 throw new Error("unexpected browser partition lookup");

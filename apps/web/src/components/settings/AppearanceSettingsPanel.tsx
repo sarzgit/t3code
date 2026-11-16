@@ -35,6 +35,7 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { ChatBackgroundSettings } from "./ChatBackgroundSettings";
+import { MusicGlobalShortcutSettings } from "./MusicGlobalShortcutSettings";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 import { TypographySection } from "./TypographySettings";
 import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
@@ -421,6 +422,7 @@ export function AppearanceSettingsPanel() {
             </div>
           }
         />
+        <MusicGlobalShortcutSettings />
         <AdvancedSettings
           targetIds={[
             searchableSetting("panel-animations").id,

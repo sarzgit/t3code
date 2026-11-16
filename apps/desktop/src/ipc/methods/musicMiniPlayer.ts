@@ -1,7 +1,9 @@
+import { MusicGlobalShortcutStatus } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import * as MiniPlayerWindow from "../../music/MiniPlayerWindow.ts";
+import * as MusicGlobalShortcuts from "../../music/MusicGlobalShortcuts.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
@@ -48,5 +50,15 @@ export const openMainFromMusicMiniPlayer = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.musicMiniPlayer.openMain")(function* () {
     yield* (yield* MiniPlayerWindow.MusicMiniPlayerWindow).openMain;
+  }),
+});
+
+// Main window only: the Music settings block shows which keys failed to register.
+export const getMusicGlobalShortcutStatus = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL,
+  payload: Schema.Void,
+  result: MusicGlobalShortcutStatus,
+  handler: Effect.fn("desktop.ipc.musicGlobalShortcuts.getStatus")(function* () {
+    return yield* (yield* MusicGlobalShortcuts.MusicGlobalShortcuts).status;
   }),
 });

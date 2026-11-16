@@ -1,17 +1,23 @@
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { MusicControlInput } from "@t3tools/contracts";
-import { useEffect } from "react";
+import { AsyncResult } from "effect/reactivity";
+import { useContext, useEffect } from "react";
 
 import { isMusicMiniPlayerWindow } from "../musicMiniPlayerWindow";
 import { musicEnvironment, useMusicEnvironmentId } from "../state/music";
 import { useAtomCommand } from "../state/use-atom-command";
 import { registerCommands } from "./dispatcher";
+import { musicGlobalShortcutControl } from "./musicGlobalShortcuts.logic";
 
-/** Play/pause, next, previous and the desktop mini-player from the keyboard, wherever focus is. */
+/**
+ * Play/pause, next, previous and the desktop mini-player from the keyboard, wherever focus is,
+ * plus the desktop-wide music keys the shell sends to this window.
+ */
 export function useMusicShortcuts(): void {
   const environmentId = useMusicEnvironmentId();
   const canControl = useAtomValue(musicEnvironment.control.permissionAtom(environmentId));
   const runControl = useAtomCommand(musicEnvironment.control);
+  const registry = useContext(RegistryContext);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers document key handlers, which live outside React
   useEffect(() => {
     if (environmentId === null || !canControl) return;
@@ -38,4 +44,19 @@ export function useMusicShortcuts(): void {
       }),
     });
   }, [environmentId, canControl, runControl]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to desktop shell key events, which live outside React
+  useEffect(() => {
+    const shortcuts = window.desktopBridge?.musicGlobalShortcuts;
+    if (!shortcuts || environmentId === null || !canControl) return;
+    return shortcuts.onAction((action) => {
+      // Read at press time, so this window does not re-render on every Music state change.
+      const state = AsyncResult.getOrElse(
+        registry.get(musicEnvironment.state({ environmentId, input: {} })),
+        () => null,
+      );
+      const input = musicGlobalShortcutControl(action, state);
+      if (input !== null) void runControl({ environmentId, input });
+    });
+  }, [environmentId, canControl, runControl, registry]);
 }

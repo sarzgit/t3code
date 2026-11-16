@@ -12,7 +12,12 @@ import type {
 import { AuthAccessTokenResult, AuthSessionState } from "./auth.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
+import {
+  type ClientSettings,
+  type MusicGlobalShortcutAction,
+  type QuitConfirmationMode,
+  SnapShotShortcut,
+} from "./settings.ts";
 import type { EditorId } from "./editor.ts";
 import { KeybindingShortcut, type PreviewForwardedShortcut } from "./keybindings.ts";
 
@@ -1185,7 +1190,23 @@ export interface DesktopBridge {
     openMain: () => Promise<void>;
     onSettingsChanged: (listener: () => void) => () => void;
   };
+  /** Desktop-wide music keys. Only the main window reads status; both windows receive actions. */
+  musicGlobalShortcuts: {
+    getStatus: () => Promise<MusicGlobalShortcutStatus>;
+    onAction: (listener: (action: MusicGlobalShortcutAction) => void) => () => void;
+  };
 }
+
+const MusicGlobalShortcutRegistration = Schema.Literals(["registered", "unavailable"]);
+/** Per saved binding that main tried to register; absent when unbound, invalid or switched off. */
+export const MusicGlobalShortcutStatus = Schema.Struct({
+  playPause: Schema.optionalKey(MusicGlobalShortcutRegistration),
+  next: Schema.optionalKey(MusicGlobalShortcutRegistration),
+  previous: Schema.optionalKey(MusicGlobalShortcutRegistration),
+  favorite: Schema.optionalKey(MusicGlobalShortcutRegistration),
+  toggleMiniPlayer: Schema.optionalKey(MusicGlobalShortcutRegistration),
+});
+export type MusicGlobalShortcutStatus = typeof MusicGlobalShortcutStatus.Type;
 
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
