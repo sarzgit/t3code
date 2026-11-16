@@ -3835,7 +3835,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     const main = yield* fs.readFileString(
       path.join(stageAppDir, "apps/desktop/dist-electron/main.cjs"),
     );
-    if (!main.includes(JSON.stringify(isolated.id))) {
+    // The id is letters and digits only, so its bundled string literal needs no escaping.
+    if (!main.includes(`"${isolated.id}"`)) {
       return yield* new DesktopIsolatedBuildError({
         detail: `apps/desktop/dist-electron was not bundled with T3CODE_DESKTOP_ISOLATED_ID=${isolated.id}.`,
       });
