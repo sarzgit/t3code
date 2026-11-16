@@ -1,5 +1,7 @@
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 
+import { isMusicMiniPlayerWindow } from "./musicMiniPlayerWindow";
+
 function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
   includeSeconds: boolean,
@@ -34,7 +36,8 @@ function resolveTimestampLocale(systemLocale: string | null | undefined): string
 }
 
 function readHostSystemLocale(): string | null {
-  if (typeof window === "undefined") return null;
+  // The mini-player's IPC gate refuses this read; it shows no dates, so the default locale suffices.
+  if (typeof window === "undefined" || isMusicMiniPlayerWindow()) return null;
   return window.desktopBridge?.getSystemLocale() ?? null;
 }
 

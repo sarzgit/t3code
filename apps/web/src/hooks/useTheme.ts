@@ -3,6 +3,7 @@ import type { DesktopBridge } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
 import { useSyncExternalStore } from "react";
+import { isMusicMiniPlayerWindow } from "../musicMiniPlayerWindow";
 import {
   applyThemePalette,
   CUSTOM_THEMES_STORAGE_KEY,
@@ -370,7 +371,13 @@ function syncDesktopTheme(
   const bridge = window.desktopBridge;
   const halves = readStoredThemeHalves();
   const desktopTheme = resolveDesktopTheme(theme, followSystem, appearanceMode, halves);
-  if (!bridge || typeof bridge.setTheme !== "function" || lastDesktopTheme === desktopTheme) {
+  // The native theme is app-wide; the main window owns it and the mini-player's IPC gate refuses it.
+  if (
+    !bridge ||
+    typeof bridge.setTheme !== "function" ||
+    lastDesktopTheme === desktopTheme ||
+    isMusicMiniPlayerWindow()
+  ) {
     return;
   }
 
