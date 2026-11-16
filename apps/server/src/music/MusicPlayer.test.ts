@@ -2151,6 +2151,94 @@ describe("MusicPlayer queue", () => {
     }),
   );
 
+  it.effect("materialises a large shuffled playlist in the order T3 was walking", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(5_200).map((_, i) => ({ id: `A${String(i).padStart(15, "0")}` }));
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      fake.player.shuffle = true;
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({
+          playlistId: PLAYLIST_ID,
+          trackId: songs[2_600]!.id,
+          index: 2_600,
+        });
+        const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+        session.emit(playingSample(songs[2_600]!.id, { shuffle: true }));
+        yield* Queue.take(received);
+        yield* until(statuses, (status) => status.active?.revision === 1);
+        const keys = (view: { readonly upcoming: ReadonlyArray<{ readonly key: string }> }) =>
+          view.upcoming.map((entry) => entry.key);
+        const listed = keys(yield* player.getQueue({ queueId: id }));
+        // T3's own steps walk exactly what the formula listed.
+        yield* player.control({ _tag: "next" });
+        yield* player.control({ _tag: "next" });
+        assert.deepStrictEqual(
+          fake.played.slice(-2).map((label) => `s${label.split("#")[1]}`),
+          listed.slice(0, 2),
+        );
+        const formula = yield* player.getQueue({ queueId: id });
+        assert.strictEqual(formula.totalUpcoming, 5_197);
+
+        yield* player.editQueue({
+          queueId: id,
+          expectedRevision: 1,
+          sourceCount: 5_200,
+          edit: {
+            _tag: "add",
+            songs: [{ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 }],
+          },
+        });
+        const explicit = yield* player.getQueue({ queueId: id });
+        assert.deepStrictEqual(keys(explicit), keys(formula));
+        assert.strictEqual(explicit.totalUpcoming, 5_198);
+        // The songs already played stay behind the cursor for Previous.
+        fake.player.position = 1;
+        yield* player.control({ _tag: "previous" });
+        yield* player.control({ _tag: "previous" });
+        assert.strictEqual(fake.played.at(-1), `${songs[2_600]!.id}#2600`);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
+  it.effect("refuses to materialise a playlist past the queue limit instead of truncating", () =>
+    Effect.gen(function* () {
+      const songs = Array.from({ length: 50_001 }, (_, i) => ({
+        id: `B${String(i).padStart(15, "0")}`,
+      }));
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 });
+        const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+        session.emit(playingSample(songs[0]!.id));
+        yield* Queue.take(received);
+        const error = yield* Effect.flip(
+          player.editQueue({
+            queueId: id,
+            expectedRevision: 0,
+            sourceCount: 50_001,
+            edit: { _tag: "clear-upcoming" },
+          }),
+        );
+        assert.strictEqual(error.reason, "queue-too-long");
+        assert.isFalse((yield* player.getQueue({ queueId: id })).edited);
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect(
     "settles shuffle on an edited queue: T3's writes, Music's toggles and a failed Reset",
     () =>
