@@ -4,6 +4,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
@@ -13,6 +14,7 @@ const resolveWindowsUserData = (appDataDirectory: string) =>
     appDataDirectory,
     isDevelopment: false,
     platform: "win32",
+    userDataDirectoryOverride: Option.none(),
   }).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
 
 it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {

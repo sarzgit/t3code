@@ -176,6 +176,48 @@ describe("DesktopAppIdentity", () => {
     ),
   );
 
+  it.effect("selects the explicit development profile without probing the shared one", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        assert.equal(yield* identity.resolveUserDataPath, "/task/chromium-user-data");
+      }),
+      {
+        legacyPathProbeError: PlatformError.badArgument({
+          module: "FileSystem",
+          method: "exists",
+          description: "the shared profile must not be probed",
+        }),
+        environment: {
+          env: {
+            VITE_DEV_SERVER_URL: "http://localhost:5173",
+            T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
+          },
+        },
+      },
+    ),
+  );
+
+  it.effect.each([
+    {
+      name: "a relative path",
+      env: {
+        VITE_DEV_SERVER_URL: "http://localhost:5173",
+        T3CODE_DESKTOP_USER_DATA_DIR: "chromium-user-data",
+      },
+    },
+    { name: "a packaged build", env: { T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data" } },
+  ])("refuses a profile override for $name instead of using the shared profile", ({ env }) =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        const error = yield* Effect.flip(identity.resolveUserDataPath);
+        assert.equal(error.operation, "validate-override");
+      }),
+      { environment: { env } },
+    ),
+  );
+
   it.effect.each([
     { stage: "Beta", environment: {} },
     {

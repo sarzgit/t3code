@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
@@ -7,7 +8,13 @@ import * as Schema from "effect/Schema";
 export class DesktopUserDataInitializationError extends Schema.TaggedError<DesktopUserDataInitializationError>()(
   "DesktopUserDataInitializationError",
   {
-    operation: Schema.Literals(["inspect", "read", "create-directory", "write"]),
+    operation: Schema.Literals([
+      "validate-override",
+      "inspect",
+      "read",
+      "create-directory",
+      "write",
+    ]),
     resourcePath: Schema.String,
     category: Schema.String,
     cause: Schema.Defect(),
@@ -36,9 +43,23 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
+    readonly userDataDirectoryOverride: Option.Option<string>;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    if (Option.isSome(input.userDataDirectoryOverride)) {
+      const override = input.userDataDirectoryOverride.value;
+      // Isolates dev runs; never fall back to the shared profile or migrate a legacy one.
+      if (!input.isDevelopment || !path.isAbsolute(override)) {
+        return yield* new DesktopUserDataInitializationError({
+          operation: "validate-override",
+          resourcePath: override,
+          category: input.isDevelopment ? "NotAbsolute" : "PackagedBuild",
+          cause: undefined,
+        });
+      }
+      return path.normalize(override);
+    }
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
       : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };

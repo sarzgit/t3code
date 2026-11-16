@@ -38,6 +38,7 @@ vi.mock("@clerk/electron/storage", () => ({
 }));
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
@@ -64,12 +65,14 @@ const layerDesktopClerk = (
     copyText: () => Effect.void,
   },
   listeners = new Map<string, (...args: unknown[]) => void>(),
+  userDataDirectoryOverride: Option.Option<string> = Option.none(),
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: clerkStateDir,
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
     platform,
+    userDataDirectoryOverride,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   const electronApp = {
@@ -142,9 +145,16 @@ describe("DesktopClerk", () => {
       platform: "win32" as const,
       userData: "/tmp/app-data/t3code-dev",
     },
+    {
+      name: "development with an explicit profile",
+      isDevelopment: true,
+      platform: "darwin" as const,
+      userData: "/task/chromium-user-data",
+      userDataDirectoryOverride: Option.some("/task/chromium-user-data"),
+    },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",
-    ({ isDevelopment, platform, userData }) => {
+    ({ isDevelopment, platform, userData, userDataDirectoryOverride }) => {
       const events: string[] = [];
       storageMock.mockReturnValue(storageAdapter);
       createClerkBridgeMock.mockImplementation(() => {
@@ -155,7 +165,15 @@ describe("DesktopClerk", () => {
       Effect.runSync(
         Effect.scoped(
           Layer.build(
-            layerDesktopClerk(isDevelopment, events, platform, DesktopPreReadyFileSystem.layer),
+            layerDesktopClerk(
+              isDevelopment,
+              events,
+              platform,
+              DesktopPreReadyFileSystem.layer,
+              undefined,
+              undefined,
+              userDataDirectoryOverride,
+            ),
           ),
         ),
       );

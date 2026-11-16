@@ -84,6 +84,9 @@ and dev starts with an empty database. `--no-seed` or `T3CODE_DEV_SEED=0` skips 
 To copy a larger source, run `vp run migrate-dev-db` with dev stopped. It may use
 substantial disk space before pruning.
 Never run a development server against the live `~/.t3/userdata`.
+`--home-dir` does not move the dev desktop's Chromium profile, which every dev desktop on the
+machine shares. Set `T3CODE_DESKTOP_USER_DATA_DIR` to an absolute path to give one run its own
+profile and single-instance lock. Packaged builds refuse it.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
 
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
