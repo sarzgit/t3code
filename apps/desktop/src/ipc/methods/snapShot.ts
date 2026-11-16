@@ -158,8 +158,8 @@ export const setSnapShotShortcutSuppressed = DesktopIpc.makeIpcMethod({
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.snapShot.setShortcutSuppressed")(function* (suppressed, event) {
     yield* ensureTrustedSnapShotSender(event);
-    yield* (yield* DesktopSnapShot.DesktopSnapShot).setShortcutSuppressed(suppressed);
-    // Recording a Snap Shot key also lets go of T3's music keys, and the other way round.
+    // Recording a Snap Shot key also lets go of T3's music keys, and the other way round; the
+    // coordinator's lease ends a recording a lost renderer never ends.
     yield* (yield* DesktopShortcutRecording.DesktopShortcutRecording).set("snapShot", suppressed);
   }),
 });

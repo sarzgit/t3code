@@ -208,7 +208,6 @@ export class DesktopSnapShot extends Context.Service<
     readonly checkShortcut: (
       shortcut: SnapShotShortcut,
     ) => Effect.Effect<DesktopSnapShotShortcutAvailability>;
-    readonly setShortcutSuppressed: (suppressed: boolean) => Effect.Effect<void>;
     readonly capture: Effect.Effect<void, DesktopSnapShotError>;
     readonly listPending: Effect.Effect<
       ReadonlyArray<DesktopPendingSnapShot>,
@@ -1374,11 +1373,6 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const setShortcutSuppressed = (suppressed: boolean) =>
-    Effect.sync(() => {
-      shortcutSuppressed = suppressed;
-    });
-
   const configure = Effect.fn("desktop.snapShot.configure")(function* (settings: ClientSettings) {
     yield* configurationMutex.withPermits(1)(applySettings(settings, null));
   });
@@ -1615,6 +1609,8 @@ export const make = Effect.gen(function* () {
     configurationMutex.withPermits(1)(
       Effect.gen(function* () {
         recordingKeys = recording;
+        // Shortcuts that bypass Electron (modifier pairs, portals) still call back; ignore them.
+        shortcutSuppressed = recording;
         if (recording) {
           if (registeredAccelerator !== undefined) {
             Electron.globalShortcut.unregister(registeredAccelerator);
@@ -1753,7 +1749,6 @@ export const make = Effect.gen(function* () {
       ),
     ),
     checkShortcut,
-    setShortcutSuppressed,
     capture,
     listPending: fileSystem.readDirectory(captureDirectory).pipe(
       Effect.catchTags({

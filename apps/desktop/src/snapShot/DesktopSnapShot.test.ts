@@ -2045,12 +2045,19 @@ it.effect("verifies only native shortcut delivery and captures normally", () => 
       yield* service.capture;
       assert.isFalse((yield* service.state).shortcutVerified);
       linuxCaptureMock.mockClear();
+      // A shortcut that doesn't go through Electron (a portal here, a modifier pair on macOS)
+      // still reaches the callback; it must not capture while any Settings recorder is open.
       const trigger = portalShortcutInstances.at(-1)!.onCapture;
-      yield* service.setShortcutSuppressed(true);
+      const recordings = yield* DesktopShortcutRecording.DesktopShortcutRecording;
+      yield* recordings.set("music", true);
+      yield* Effect.promise(trigger);
+      yield* recordings.set("snapShot", true);
+      yield* recordings.set("music", false);
       yield* Effect.promise(trigger);
       assert.isFalse((yield* service.state).shortcutVerified);
       assert.lengthOf(linuxCaptureMock.mock.calls, 0);
-      yield* service.setShortcutSuppressed(false);
+      // A Snap Shot recorder that never says it stopped (lost renderer) still gives it back.
+      yield* TestClock.adjust("60 seconds");
       yield* Effect.promise(trigger);
       assert.isTrue((yield* service.state).shortcutVerified);
       assert.lengthOf(linuxCaptureMock.mock.calls, 1);
