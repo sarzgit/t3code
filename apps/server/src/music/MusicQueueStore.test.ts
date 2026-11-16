@@ -163,4 +163,33 @@ describe("MusicQueueStore", () => {
       }
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("leaves a body it cannot read untouched and writes nothing that run", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-music-queue-" });
+      const paths = yield* withStore(baseDir, files);
+      yield* fileSystem.makeDirectory(paths.dir, { recursive: true });
+      const original = JSON.stringify(explicitBody(1));
+      yield* fileSystem.writeFileString(paths.body, original);
+      yield* fileSystem.chmod(paths.body, 0o000);
+      const body = explicitBody(5);
+      const loaded = yield* withStore(
+        baseDir,
+        Effect.flatMap(Store.MusicQueueStore, (store) =>
+          Effect.gen(function* () {
+            const loaded = yield* store.load;
+            yield* store.saveBody(body, position(body));
+            yield* store.savePosition(position(body));
+            yield* store.settled;
+            return loaded;
+          }),
+        ),
+      );
+      assert.strictEqual(loaded.body, null);
+      yield* fileSystem.chmod(paths.body, 0o600);
+      assert.strictEqual(yield* fileSystem.readFileString(paths.body), original);
+      assert.isFalse(yield* fileSystem.exists(paths.position));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

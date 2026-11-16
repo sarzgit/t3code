@@ -298,8 +298,11 @@ export const layer = Layer.effect(
     });
     const body = yield* bodyFile.load;
     const position = yield* positionFile.load;
+    // A checkpoint belongs to its body, so a run that must not write one writes neither.
+    const readOnly = bodyFile.isReadOnly() || positionFile.isReadOnly();
     const writer = yield* makeWriter(body, (pending) =>
       Effect.gen(function* () {
+        if (readOnly) return;
         if (pending.body !== undefined) {
           yield* pending.body === null ? bodyFile.remove : bodyFile.replace(pending.body);
         }
