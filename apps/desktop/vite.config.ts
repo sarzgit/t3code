@@ -8,7 +8,7 @@ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 import {
   desktopBuildIdentityMarker,
   desktopIsolatedIdentity,
-} from "../../packages/shared/src/desktopIsolatedIdentity.ts";
+} from "@t3tools/shared/desktopIsolatedIdentity";
 
 const repoEnv = loadRepoEnv();
 const isolatedIdentity = repoEnv.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "";

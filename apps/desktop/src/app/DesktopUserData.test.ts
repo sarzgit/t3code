@@ -6,6 +6,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
+import { desktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
+
 import { clearStaleGpuCaches, resolveUserDataPath } from "./DesktopUserData.ts";
 
 it.effect.each(["t3code", "T3 Code (Alpha)"])(
@@ -146,4 +148,74 @@ it.effect("retries on the next launch when a GPU cache cannot be removed", () =>
 
     assert.deepStrictEqual(writes, []);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "keeps an isolated build's home and profile apart from the installed app's, by any link",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-isolated-paths-" });
+      const home = path.join(root, "home");
+      const appData = path.join(home, "Library", "Application Support");
+      yield* fs.makeDirectory(path.join(home, ".t3", "userdata"), { recursive: true });
+      yield* fs.makeDirectory(path.join(appData, "t3code-v2"), { recursive: true });
+      yield* fs.makeDirectory(path.join(root, "task"), { recursive: true });
+      yield* fs.symlink(path.join(home, ".t3"), path.join(root, "home-alias"));
+      yield* fs.symlink(home, path.join(root, "ancestor-alias"));
+      yield* fs.symlink(path.join(appData, "t3code-v2"), path.join(root, "profile-alias"));
+      const resolve = (baseDir: string, override?: string) =>
+        resolveUserDataPath({
+          appDataDirectory: appData,
+          isDevelopment: false,
+          platform: "darwin",
+          userDataDirectoryOverride: Option.fromNullishOr(override),
+          homeDirectory: home,
+          baseDir,
+          isolatedIdentity: Option.some(desktopIsolatedIdentity("musictest")),
+        }).pipe(
+          Effect.map((profile) => ({ profile })),
+          Effect.catchTags({
+            DesktopUserDataInitializationError: (error) =>
+              Effect.succeed({ refused: error.category }),
+          }),
+        );
+      const ownProfile = path.join(appData, "t3code-isolated-musictest");
+      assert.deepStrictEqual(
+        [
+          // Its own default home and profile, created later by the app.
+          yield* resolve(path.join(home, ".t3-isolated-musictest")),
+          // A separate task home and profile.
+          yield* resolve(path.join(root, "task", "home"), path.join(root, "task", "profile")),
+          // T3CODE_HOME inherited from the installed app, without any profile override.
+          yield* resolve(path.join(home, ".t3")),
+          yield* resolve(path.join(home, ".t3", "userdata")),
+          // The same home reached through a link to it or to an ancestor.
+          yield* resolve(path.join(root, "home-alias")),
+          yield* resolve(path.join(root, "ancestor-alias", ".t3")),
+          // A chosen profile that is the installed app's, through a link, or holds the home.
+          yield* resolve(path.join(root, "task", "home"), path.join(root, "profile-alias")),
+          yield* resolve(path.join(root, "task", "home"), path.join(root, "task")),
+        ],
+        [
+          { profile: ownProfile },
+          { profile: path.join(root, "task", "profile") },
+          { refused: "SharedT3Home" },
+          { refused: "SharedT3Home" },
+          { refused: "SharedT3Home" },
+          { refused: "SharedT3Home" },
+          { refused: "SharedLocation" },
+          { refused: "SharedLocation" },
+        ],
+      );
+      // Its own default profile turned into a link to the installed app's.
+      yield* fs.symlink(path.join(appData, "t3code-v2"), ownProfile);
+      assert.deepStrictEqual(yield* resolve(path.join(home, ".t3-isolated-musictest")), {
+        refused: "SharedLocation",
+      });
+      // Checking reads metadata only: nothing new was created.
+      assert.isFalse(yield* fs.exists(path.join(home, ".t3-isolated-musictest")));
+      assert.isFalse(yield* fs.exists(path.join(root, "task", "home")));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

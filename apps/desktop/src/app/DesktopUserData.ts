@@ -11,6 +11,7 @@ export class DesktopUserDataInitializationError extends Schema.TaggedError<Deskt
   {
     operation: Schema.Literals([
       "validate-override",
+      "validate-isolated",
       "inspect",
       "read",
       "create-directory",
@@ -45,39 +46,88 @@ const isWithin = (path: Path.Path, parent: string, child: string) => {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 };
 
-/**
- * Why an override is refused, if it is. Only an isolated packaged build takes one, as a profile
- * outside the application data folder and `~/.t3` beside its own T3 home; an ordinary packaged
- * build shares its name and Keychain item with the installed app.
- */
+const overlaps = (path: Path.Path, a: string, b: string) =>
+  isWithin(path, a, b) || isWithin(path, b, a);
+
+/** Development takes any absolute profile; an ordinary packaged build never takes one. */
 const overrideProblem = (
   path: Path.Path,
   override: string,
   input: {
-    readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
-    readonly homeDirectory: string;
-    readonly baseDir: string;
     readonly isolatedIdentity: Option.Option<DesktopIsolatedIdentity>;
   },
 ) => {
   if (!path.isAbsolute(override)) return "NotAbsolute";
   if (input.isDevelopment) return null;
   if (Option.isNone(input.isolatedIdentity)) return "PackagedBuild";
-  const defaultHome = path.join(input.homeDirectory, ".t3");
-  const home = path.normalize(input.baseDir);
-  if (!path.isAbsolute(home) || isWithin(path, defaultHome, home)) return "PackagedNeedsOwnT3Home";
-  const profile = path.normalize(override);
+  return null;
+};
+
+/**
+ * The real location a path names: its nearest existing ancestor with links resolved, plus the
+ * rest. Only metadata is read; nothing is created.
+ */
+const canonical = Effect.fnUntraced(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  target: string,
+) {
+  const rest: Array<string> = [];
+  let current = path.resolve(target);
+  while (!(yield* fs.exists(current))) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(target);
+    rest.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(yield* fs.realPath(current), ...rest);
+});
+
+/**
+ * Why an isolated build's home or profile is refused, if it is. Checked on every start, before
+ * the profile, its lock or Clerk's storage are touched: neither may be, contain or sit inside the
+ * installed app's T3 home or Chromium profiles, by any link, nor overlap each other. A chosen
+ * profile also stays outside the application data folder.
+ */
+const isolatedProblem = Effect.fnUntraced(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  input: {
+    readonly appDataDirectory: string;
+    readonly homeDirectory: string;
+    readonly baseDir: string;
+  },
+  profile: string,
+  chosen: boolean,
+) {
+  if (!path.isAbsolute(input.baseDir)) return "PackagedNeedsOwnT3Home";
+  const real = (target: string) => canonical(fs, path, target);
+  const shared: Array<string> = [yield* real(path.join(input.homeDirectory, ".t3"))];
+  for (const name of SHARED_PROFILE_NAMES) {
+    shared.push(yield* real(path.join(input.appDataDirectory, name)));
+  }
+  const home = yield* real(input.baseDir);
+  if (shared.some((location) => overlaps(path, location, home))) return "SharedT3Home";
+  const realProfile = yield* real(profile);
   if (
-    isWithin(path, input.appDataDirectory, profile) ||
-    isWithin(path, defaultHome, profile) ||
-    isWithin(path, home, profile) ||
-    isWithin(path, profile, home)
+    shared.some((location) => overlaps(path, location, realProfile)) ||
+    overlaps(path, home, realProfile) ||
+    (chosen && isWithin(path, yield* real(input.appDataDirectory), realProfile))
   ) {
     return "SharedLocation";
   }
   return null;
-};
+});
+
+// Every profile the installed app, development or an older version may use.
+const SHARED_PROFILE_NAMES = [
+  "t3code-v2",
+  "t3code",
+  "T3 Code (Alpha)",
+  "t3code-dev",
+  "T3 Code (Dev)",
+];
 
 export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPath")(
   function* (input: {
@@ -103,11 +153,36 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
           cause: undefined,
         });
       }
-      return path.normalize(override);
     }
     // Its own folder, never a migration from the installed app's profiles.
     if (Option.isSome(input.isolatedIdentity)) {
-      return path.join(input.appDataDirectory, input.isolatedIdentity.value.userDataName);
+      const identity = input.isolatedIdentity.value;
+      const profile = Option.getOrElse(input.userDataDirectoryOverride, () =>
+        path.join(input.appDataDirectory, identity.userDataName),
+      );
+      const problem = yield* isolatedProblem(
+        fs,
+        path,
+        input,
+        profile,
+        Option.isSome(input.userDataDirectoryOverride),
+      ).pipe(
+        Effect.mapError((cause) =>
+          DesktopUserDataInitializationError.fromFileSystem(cause, "validate-isolated", profile),
+        ),
+      );
+      if (problem !== null) {
+        return yield* new DesktopUserDataInitializationError({
+          operation: "validate-isolated",
+          resourcePath: profile,
+          category: problem,
+          cause: undefined,
+        });
+      }
+      return path.normalize(profile);
+    }
+    if (Option.isSome(input.userDataDirectoryOverride)) {
+      return path.normalize(input.userDataDirectoryOverride.value);
     }
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }

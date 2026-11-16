@@ -140,6 +140,7 @@ const withIdentity = <A, E, R>(
                   ),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
+            realPath: (path) => Effect.succeed(path),
           }),
         ),
         Layer.provideMerge(layerAssets(input.pngIconPath ?? Option.none())),
@@ -242,7 +243,7 @@ describe("DesktopAppIdentity", () => {
         Effect.gen(function* () {
           const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
           const error = yield* Effect.flip(identity.resolveUserDataPath);
-          assert.equal(error.operation, "validate-override");
+          assert.include(["validate-override", "validate-isolated"], error.operation);
         }),
         { environment: { env, isolatedIdentity: isolatedIdentity ?? null } },
       ),
@@ -272,12 +273,8 @@ describe("DesktopAppIdentity", () => {
       }),
       {
         calls,
-        // Its own folder: neither the shipping profile nor a legacy one is looked at.
-        legacyPathProbeError: PlatformError.badArgument({
-          module: "FileSystem",
-          method: "exists",
-          description: "the shared profile must not be probed",
-        }),
+        // Its own folder, even when an old shipping profile is there to migrate.
+        legacyPathExists: true,
         environment: { isolatedIdentity: MUSIC_TEST },
       },
     );

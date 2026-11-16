@@ -233,6 +233,35 @@ describe("DesktopClerk", () => {
     },
   );
 
+  it("refuses an isolated build on the installed app's T3 home before touching any profile", () => {
+    const events: string[] = [];
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- Startup builds this layer synchronously before ready; the assertion is on that build.
+    const exit = Effect.runSyncExit(
+      Effect.scoped(
+        Layer.build(
+          layerDesktopClerk(
+            false,
+            events,
+            "darwin",
+            DesktopPreReadyFileSystem.layer,
+            undefined,
+            undefined,
+            Option.none(),
+            "/tmp/home/.t3",
+            Option.some(desktopIsolatedIdentity("musictest")),
+          ),
+        ),
+      ),
+    );
+    assert.isTrue(Exit.isFailure(exit));
+    // No userData path, profile lock, cache cleanup or Clerk storage happened first.
+    assert.deepEqual(events, []);
+    assert.equal(createClerkBridgeMock.mock.calls.length, 0);
+    assert.equal(storageMock.mock.calls.length, 0);
+  });
+
   it.effect.each(["before configure", "after configure"] as const)(
     "reveals the running window when a second instance launches %s",
     (entry) => {
