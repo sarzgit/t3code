@@ -147,3 +147,4 @@ export const MUSIC_MINI_PLAYER_SETTINGS_CHANGED_CHANNEL =
   "desktop:music-mini-player-settings-changed";
 export const MUSIC_GLOBAL_SHORTCUT_ACTION_CHANNEL = "desktop:music-shortcut";
 export const MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL = "desktop:music-shortcuts-get-status";
+export const MUSIC_GLOBAL_SHORTCUTS_SET_RECORDING_CHANNEL = "desktop:music-shortcuts-set-recording";

@@ -90,6 +90,16 @@ function MusicGlobalShortcutRows({ bridge }: { bridge: DesktopBridge["musicGloba
     };
   }, [bridge]);
 
+  const isRecording = recording !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the shell holds T3's global keys; it lets them go while a key is recorded so the press reaches this recorder
+  useEffect(() => {
+    if (!isRecording) return;
+    void bridge.setRecording(true).catch(() => undefined);
+    return () => {
+      void bridge.setRecording(false).catch(() => undefined);
+    };
+  }, [bridge, isRecording]);
+
   const save = async (next: ClientSettings["musicGlobalShortcuts"]) => {
     await updateClientSettings({ musicGlobalShortcuts: next });
     await refreshStatus();

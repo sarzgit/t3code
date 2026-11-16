@@ -44,6 +44,7 @@ const chord = (key: string, modifiers: Partial<KeybindingShortcut> = {}): Keybin
 
 function setup() {
   const saved: ClientSettings[] = [];
+  const recording: boolean[] = [];
   let status: MusicGlobalShortcutStatus = { playPause: "unavailable" };
   __resetClientSettingsPersistenceForTests();
   __setClientSettingsForTests({
@@ -62,6 +63,9 @@ function setup() {
     },
     musicGlobalShortcuts: {
       getStatus: async () => status,
+      setRecording: async (value: boolean) => {
+        recording.push(value);
+      },
       onAction: () => () => undefined,
     },
   };
@@ -71,6 +75,7 @@ function setup() {
   });
   return {
     saved,
+    recording,
     [Symbol.dispose]: () => {
       Reflect.deleteProperty(window, "desktopBridge");
       __resetClientSettingsPersistenceForTests();
@@ -89,8 +94,11 @@ it("refuses clashing keys beside their binding and saves, warns and clears the r
 
   const recordNext = () => screen.getByRole("button", { name: "Record shortcut for Next" }).click();
   await recordNext();
+  // The shell lets go of T3's own keys while recording, so Play/pause's key reaches the check.
+  await vi.waitFor(() => expect(shell.recording).toEqual([true]));
   await userEvent.keyboard("{Control>}{Alt>}p{/Alt}{/Control}");
   await expect.element(screen.getByText("Already used for Play/pause.")).toBeVisible();
+  await vi.waitFor(() => expect(shell.recording).toEqual([true, false]));
 
   await recordNext();
   await userEvent.keyboard("{Meta>}{Shift>}2{/Shift}{/Meta}");

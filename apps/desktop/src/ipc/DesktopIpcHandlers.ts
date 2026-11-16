@@ -175,6 +175,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(MusicMiniPlayerIpc.closeMusicMiniPlayer);
   yield* ipc.handle(MusicMiniPlayerIpc.openMainFromMusicMiniPlayer);
   yield* ipc.handle(MusicMiniPlayerIpc.getMusicGlobalShortcutStatus);
+  yield* ipc.handle(MusicMiniPlayerIpc.setMusicGlobalShortcutsRecording);
   for (const previewMethod of PreviewIpc.methods) {
     // Explicit types preserve the error/service union of these heterogeneous preview methods.
     yield* ipc.handle<

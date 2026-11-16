@@ -401,6 +401,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   musicGlobalShortcuts: {
     getStatus: () => ipcRenderer.invoke(IpcChannels.MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL),
+    setRecording: (recording) =>
+      ipcRenderer.invoke(IpcChannels.MUSIC_GLOBAL_SHORTCUTS_SET_RECORDING_CHANNEL, recording),
     onAction: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, action: unknown) => {
         if (isMusicGlobalShortcutAction(action)) listener(action);

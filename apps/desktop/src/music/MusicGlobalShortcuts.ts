@@ -10,7 +10,9 @@ import {
 } from "@t3tools/shared/musicGlobalShortcuts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
@@ -28,6 +30,8 @@ import * as MiniPlayerWindow from "./MiniPlayerWindow.ts";
 
 // The callback gets no key event, so a held key is told apart from a new press by time alone.
 const ACTION_COOLDOWN_NS = 300_000_000n;
+// A recorder that never says it stopped (a crashed or reloaded renderer) gives the keys back.
+const RECORDING_LEASE = Duration.seconds(60);
 
 const { logWarning } = makeComponentLogger("music-global-shortcuts");
 
@@ -38,6 +42,11 @@ export class MusicGlobalShortcuts extends Context.Service<
     /** Runs after every client settings write; registers or frees only this service's keys. */
     readonly configure: (settings: ClientSettings) => Effect.Effect<void>;
     readonly status: Effect.Effect<MusicGlobalShortcutStatus>;
+    /**
+     * While Settings records a key, T3's own keys are let go so the recorder sees the press;
+     * a registered key would otherwise fire its action instead of reaching the duplicate check.
+     */
+    readonly setRecording: (recording: boolean) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/music/MusicGlobalShortcuts") {}
 
@@ -63,6 +72,9 @@ export const make = Effect.gen(function* () {
   const owned = new Map<MusicGlobalShortcutAction, string>();
   const failed = new Set<MusicGlobalShortcutAction>();
   const lastFiredAt = new Map<MusicGlobalShortcutAction, bigint>();
+  let recording = false;
+  let lastSettings: ClientSettings | null = null;
+  const lease = yield* FiberHandle.make<void, never>();
 
   const liveContents = (window: Electron.BrowserWindow) =>
     window.isDestroyed() || window.webContents.isDestroyed()
@@ -125,7 +137,10 @@ export const make = Effect.gen(function* () {
   });
 
   const apply = Effect.fn("MusicGlobalShortcuts.apply")(function* (settings: ClientSettings) {
-    const next = yield* desired(settings);
+    lastSettings = settings;
+    const next = recording
+      ? new Map<MusicGlobalShortcutAction, string>()
+      : yield* desired(settings);
     // Free changed keys first, so two actions can swap keys in one save.
     for (const action of MUSIC_GLOBAL_SHORTCUT_ACTIONS) {
       if (owned.has(action) && owned.get(action) !== next.get(action)) unregister(action);
@@ -142,6 +157,20 @@ export const make = Effect.gen(function* () {
       }
     }
   });
+
+  const reapply = Effect.suspend(() =>
+    lastSettings === null
+      ? clientSettings.get.pipe(
+          Effect.map(Option.getOrElse(() => DEFAULT_CLIENT_SETTINGS)),
+          Effect.flatMap(apply),
+        )
+      : apply(lastSettings),
+  ).pipe(Effect.ignore);
+
+  const setRecording = Effect.fn("MusicGlobalShortcuts.setRecording")(function* (next: boolean) {
+    recording = next;
+    yield* reapply;
+  }, mutex.withPermits(1));
 
   const releaseAll = Effect.sync(() => {
     for (const action of MUSIC_GLOBAL_SHORTCUT_ACTIONS) unregister(action);
@@ -161,6 +190,16 @@ export const make = Effect.gen(function* () {
     configure: Effect.fn("MusicGlobalShortcuts.configure")(function* (settings) {
       yield* apply(settings);
     }, mutex.withPermits(1)),
+    setRecording: Effect.fn("MusicGlobalShortcuts.setRecordingLease")(function* (next) {
+      yield* FiberHandle.clear(lease);
+      yield* setRecording(next);
+      if (next) {
+        yield* FiberHandle.run(
+          lease,
+          Effect.sleep(RECORDING_LEASE).pipe(Effect.andThen(setRecording(false))),
+        );
+      }
+    }),
     status: Effect.sync(() => {
       const status: { -readonly [K in MusicGlobalShortcutAction]?: "registered" | "unavailable" } =
         {};

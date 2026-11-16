@@ -54,6 +54,16 @@ export const openMainFromMusicMiniPlayer = DesktopIpc.makeIpcMethod({
 });
 
 // Main window only: the Music settings block shows which keys failed to register.
+// Main window only: Settings is where keys are recorded.
+export const setMusicGlobalShortcutsRecording = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.MUSIC_GLOBAL_SHORTCUTS_SET_RECORDING_CHANNEL,
+  payload: Schema.Boolean,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.musicGlobalShortcuts.setRecording")(function* (recording) {
+    yield* (yield* MusicGlobalShortcuts.MusicGlobalShortcuts).setRecording(recording);
+  }),
+});
+
 export const getMusicGlobalShortcutStatus = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.MUSIC_GLOBAL_SHORTCUTS_GET_STATUS_CHANNEL,
   payload: Schema.Void,

@@ -159,6 +159,27 @@ it.effect("registers only valid bindings and frees only its own keys on every wa
       assert.lengthOf(unregisterMock.mock.calls, 2);
 
       yield* shortcuts.configure(withShortcuts(changed));
+      // Recording a key in Settings lets go of T3's keys only, and takes them back after.
+      unregisterMock.mockClear();
+      registerMock.mockClear();
+      yield* shortcuts.setRecording(true);
+      assert.sameMembers(
+        unregisterMock.mock.calls.map(([accelerator]) => accelerator),
+        ["CommandOrControl+Alt+P", "Control+Alt+J"],
+      );
+      assert.deepEqual(yield* shortcuts.status, {});
+      // A save while recording keeps them free.
+      yield* shortcuts.configure(withShortcuts(changed));
+      assert.lengthOf(registerMock.mock.calls, 0);
+      yield* shortcuts.setRecording(false);
+      assert.sameMembers(registered(), ["CommandOrControl+Alt+P", "Control+Alt+J"]);
+      // A recorder that never says it stopped gives the keys back after a minute.
+      registerMock.mockClear();
+      yield* shortcuts.setRecording(true);
+      yield* TestClock.adjust("59 seconds");
+      assert.lengthOf(registerMock.mock.calls, 0);
+      yield* TestClock.adjust("1 second");
+      assert.sameMembers(registered(), ["CommandOrControl+Alt+P", "Control+Alt+J"]);
       unregisterMock.mockClear();
     }).pipe(Effect.provide(layer));
     // Quitting closes the layer's scope, which frees what is still held.
