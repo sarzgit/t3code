@@ -1554,6 +1554,19 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     active: state.active,
   });
 
+  // Only a clean shutdown marks its last checkpoint closed, and only that one may be taken back
+  // after a restart: a crash or a failed write leaves an earlier one, so the queue stays a Resume
+  // card whatever Music did meanwhile.
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      const current = queue;
+      if (current === null) return;
+      const savedAt = yield* Clock.currentTimeMillis;
+      yield* store.savePosition({ ...positionOf(current, savedAt), closed: true });
+      yield* store.settled;
+    }),
+  );
+
   const clearReplaced = Effect.suspend(() => {
     replaced = null;
     return FiberHandle.clear(replacedTimer);
@@ -2887,7 +2900,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
   };
 
   /**
-   * After a restart, a queue T3 still played when the server stopped becomes T3's again without
+   * After a clean restart, a queue T3 still played when the server stopped becomes T3's again without
    * touching Music, but only when the first sample naming a playlist shows that exact entry, once
    * in the queue, from the same playlist, where the last checkpoint left it. Anything else stays
    * a Resume card: the song may be Music's own now.
@@ -2909,20 +2922,22 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     if (song === null || track.id !== current.trackId || state.playlistId !== song.playlistId) {
       return;
     }
-    // A song queued twice: Music's position can't say which copy is playing.
+    // A song twice in the queue or in its playlist now: Music's position can't say which copy
+    // is playing, so nothing short of exactly one of each is taken back. The count only reads.
     const explicit = current.explicit;
-    const copies =
-      explicit !== null
-        ? explicit.order.filter(
-            (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
-          ).length
-        : Number(
-            yield* runScript("queue", "JavaScript", COPIES_SCRIPT, [
-              song.playlistId,
-              track.id,
-            ]).pipe(Effect.orElseSucceed(() => "0")),
-          );
-    if (copies !== 1) return;
+    if (
+      explicit !== null &&
+      explicit.order.filter(
+        (value) => MusicQueue.songForValue(explicit, value)?.trackId === track.id,
+      ).length !== 1
+    ) {
+      return;
+    }
+    const copies = yield* runScript("queue", "JavaScript", COPIES_SCRIPT, [
+      song.playlistId,
+      track.id,
+    ]).pipe(Effect.orElseSucceed(() => "0"));
+    if (copies !== "1") return;
     const drift = state.positionSec - current.positionSec;
     const holds =
       state.playback === "paused"

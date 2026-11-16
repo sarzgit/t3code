@@ -1607,10 +1607,25 @@ const playingSample = (trackId: string, overrides: Record<string, unknown> = {})
 
 /** An edited playlist queue saved on s2 at 0:42, as files a restarted server would read. */
 const savedEditedQueue = Effect.fn("savedEditedQueue")(function* (
-  options: { readonly letGo?: boolean; readonly duplicate?: boolean } = {},
+  options: {
+    readonly letGo?: boolean;
+    readonly duplicate?: boolean;
+    /** The playlist holds the current song twice, and the edit removed the other copy. */
+    readonly removedSourceCopy?: boolean;
+    /** Every write from letting go onward fails, the closing checkpoint included. */
+    readonly failFromLetGo?: boolean;
+    /** "crash" keeps only what was written while running; "clean" also runs shutdown. */
+    readonly shutdown?: "clean" | "crash";
+  } = {},
 ) {
   const songs = queueSongs(4);
+  if (options.removedSourceCopy === true) songs[3]!.id = songs[2]!.id;
   const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+  const written = {
+    body: null as MusicQueueStore.QueueBody | null,
+    position: null as MusicQueueStore.QueuePosition | null,
+  };
+  let failing = false;
   const first = yield* makeHarness({
     respond: (args) =>
       args[4]!.includes("userPlaylists")
@@ -1621,7 +1636,7 @@ const savedEditedQueue = Effect.fn("savedEditedQueue")(function* (
           )
         : runFakeScript(args, fake.music),
   });
-  const files = yield* Effect.gen(function* () {
+  const running = yield* Effect.gen(function* () {
     const player = yield* MusicPlayer.MusicPlayer;
     const store = yield* MusicQueueStore.MusicQueueStore;
     const statuses = yield* subscribeQueue(player);
@@ -1636,7 +1651,13 @@ const savedEditedQueue = Effect.fn("savedEditedQueue")(function* (
       queueId: id,
       expectedRevision: 0,
       sourceCount: 4,
-      edit: { _tag: "remove", targets: [{ key: "s1", trackId: songs[1]!.id }] },
+      edit: {
+        _tag: "remove",
+        targets: [
+          { key: "s1", trackId: songs[1]!.id },
+          ...(options.removedSourceCopy === true ? [{ key: "s3", trackId: songs[3]!.id }] : []),
+        ],
+      },
     });
     if (options.duplicate === true) {
       yield* player.editQueue({
@@ -1652,14 +1673,26 @@ const savedEditedQueue = Effect.fn("savedEditedQueue")(function* (
     const track = { id: songs[2]!.id, name: "Été: Live", artist: "Ärtist", duration: 200 };
     session.emit(sampleLine({ state: "playing", position: 42, track }));
     yield* until(received, (state) => state._tag === "ready" && state.track?.id === track.id);
+    yield* store.settled;
     if (options.letGo === true) {
-      // The user plays another song in Music: T3 lets go, and the files say so.
-      session.emit(sampleLine({ state: "playing", position: 5, track: { id: songs[3]!.id } }));
+      // The user plays another song in Music: T3 lets go, and the files say so unless that fails.
+      failing = options.failFromLetGo === true;
+      session.emit(sampleLine({ state: "playing", position: 5, track: { id: songs[0]!.id } }));
       yield* until(statuses, (status) => status.active === null);
     }
     yield* store.settled;
     return yield* store.load;
-  }).pipe(providePlayer(first.runner), Effect.scoped);
+  }).pipe(
+    providePlayer(
+      first.runner,
+      "darwin",
+      undefined,
+      MusicQueueStore.layerMemory({}, { files: written, failWrites: () => failing }),
+    ),
+    Effect.scoped,
+  );
+  const files =
+    options.shutdown === "crash" ? running : { body: written.body, position: written.position };
 
   return { songs, fake, files };
 });
@@ -1982,7 +2015,12 @@ describe("MusicPlayer queue", () => {
         const songs = queueSongs(4);
         const fake = fakeMusic({ [PLAYLIST_ID]: songs });
         const first = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
-        const files = yield* Effect.gen(function* () {
+        // Left by a clean shutdown, the only kind a restart may take back from.
+        const files = {
+          body: null as MusicQueueStore.QueueBody | null,
+          position: null as MusicQueueStore.QueuePosition | null,
+        };
+        yield* Effect.gen(function* () {
           const player = yield* MusicPlayer.MusicPlayer;
           const store = yield* MusicQueueStore.MusicQueueStore;
           const statuses = yield* subscribeQueue(player);
@@ -1995,8 +2033,15 @@ describe("MusicPlayer queue", () => {
           session.emit(playingSample(songs[1]!.id, { position: 61, state: "paused" }));
           yield* until(received, (state) => state._tag === "ready" && state.playback === "paused");
           yield* store.settled;
-          return yield* store.load;
-        }).pipe(providePlayer(first.runner), Effect.scoped);
+        }).pipe(
+          providePlayer(
+            first.runner,
+            "darwin",
+            undefined,
+            MusicQueueStore.layerMemory({}, { files }),
+          ),
+          Effect.scoped,
+        );
         if (duplicate) songs[3]!.id = songs[1]!.id;
         const played = fake.played.length;
         const restarted = yield* makeHarness({
@@ -2029,6 +2074,13 @@ describe("MusicPlayer queue", () => {
       const { songs, fake, files } = yield* savedEditedQueue();
       const letGo = (yield* savedEditedQueue({ letGo: true })).files;
       const duplicated = (yield* savedEditedQueue({ duplicate: true })).files;
+      // Still T3's when it stopped, but not cleanly: a crash, or letting go whose write failed.
+      const crashed = (yield* savedEditedQueue({ shutdown: "crash" })).files;
+      const failedLetGo = (yield* savedEditedQueue({ letGo: true, failFromLetGo: true })).files;
+      // The playlist holds the song twice: the edit removed the other copy, or Music gained one.
+      const removedCopy = yield* savedEditedQueue({ removedSourceCopy: true });
+      const gainedCopy = yield* savedEditedQueue();
+      gainedCopy.songs[3]!.id = gainedCopy.songs[2]!.id;
       const legacy = {
         ...files,
         position:
@@ -2040,6 +2092,7 @@ describe("MusicPlayer queue", () => {
         readonly sample: Record<string, unknown>;
         readonly adopted: boolean;
         readonly files?: typeof files;
+        readonly music?: unknown;
         readonly before?: Record<string, unknown>;
       }> = [
         { sample: { state: "paused", position: 42.4, track: current }, adopted: true },
@@ -2050,6 +2103,20 @@ describe("MusicPlayer queue", () => {
         { files: letGo, sample: atSavedSpot, adopted: false },
         { files: legacy, sample: atSavedSpot, adopted: false },
         { files: duplicated, sample: atSavedSpot, adopted: false },
+        { files: crashed, sample: atSavedSpot, adopted: false },
+        { files: failedLetGo, sample: atSavedSpot, adopted: false },
+        {
+          files: removedCopy.files,
+          music: removedCopy.fake.music,
+          sample: { ...atSavedSpot, track: { id: removedCopy.songs[2]!.id, duration: 200 } },
+          adopted: false,
+        },
+        {
+          files: gainedCopy.files,
+          music: gainedCopy.fake.music,
+          sample: { ...atSavedSpot, track: { id: gainedCopy.songs[2]!.id, duration: 200 } },
+          adopted: false,
+        },
         { sample: { state: "playing", position: 70, track: current }, adopted: true },
         // Started again from the top, from another playlist, or another song: Music's queue now.
         { sample: { state: "playing", position: 3, track: current }, adopted: false },
@@ -2062,9 +2129,15 @@ describe("MusicPlayer queue", () => {
           adopted: false,
         },
       ];
-      for (const { sample, adopted, before, files: caseFiles = files } of cases) {
+      for (const {
+        sample,
+        adopted,
+        before,
+        files: caseFiles = files,
+        music = fake.music,
+      } of cases) {
         const restarted = yield* makeHarness({
-          respond: (args) => runFakeScript(args, fake.music),
+          respond: (args) => runFakeScript(args, music),
         });
         yield* Effect.gen(function* () {
           const player = yield* MusicPlayer.MusicPlayer;
@@ -2107,8 +2180,10 @@ describe("MusicPlayer queue", () => {
               : { active: null, saved: true, playingFrom: undefined },
             JSON.stringify(sample),
           );
-          // Taking it back plays nothing and seeks nothing.
-          assert.deepStrictEqual(yield* Ref.get(restarted.calls), []);
+          // Deciding only reads how often the song is in its playlist; it plays and seeks nothing.
+          for (const call of yield* Ref.get(restarted.calls)) {
+            assert.include(call[4], "ids.filter((id) => id === argv[1])");
+          }
           if (!adopted) {
             yield* player.dismissSavedQueue({ queueId: saved.id, revision: saved.revision });
             assert.isNull((yield* Queue.take(yield* subscribeQueue(player))).saved);
