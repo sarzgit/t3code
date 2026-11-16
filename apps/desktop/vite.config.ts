@@ -5,8 +5,13 @@ import { defaultInclude, defineConfig } from "vite-plus";
 
 import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+import {
+  desktopBuildIdentityMarker,
+  desktopIsolatedIdentity,
+} from "../../packages/shared/src/desktopIsolatedIdentity.ts";
 
 const repoEnv = loadRepoEnv();
+const isolatedIdentity = repoEnv.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "";
 const domTests = ["src/preview/PickPreload.test.ts"];
 
 // Install only bundle externals; the server bundle already carries its dependency tree.
@@ -24,9 +29,11 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
-  // Packaged builds only; scripts/build-desktop-artifact.ts derives the bundle from the same id.
-  __T3CODE_BUILD_DESKTOP_ISOLATED_ID__: JSON.stringify(
-    repoEnv.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "",
+  // scripts/build-desktop-artifact.ts packages a bundle only when this marker matches its id.
+  __T3CODE_BUILD_DESKTOP_IDENTITY__: JSON.stringify(
+    desktopBuildIdentityMarker(
+      isolatedIdentity === "" ? null : desktopIsolatedIdentity(isolatedIdentity),
+    ),
   ),
 };
 

@@ -30,6 +30,7 @@ import {
   readWorkspaceConfig,
   createBuildConfig,
   resolveDesktopIsolatedIdentity,
+  verifyDesktopBundleIdentity,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -639,6 +640,46 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ),
       );
       assert.strictEqual(passkeys._tag, "DesktopIsolatedBuildError");
+    }),
+  );
+
+  it.effect("packages only a desktop bundle built for the same identity, both ways", () =>
+    Effect.gen(function* () {
+      const app = resolveDesktopIsolatedIdentity({ T3CODE_DESKTOP_ISOLATED_ID: "app" });
+      const music = resolveDesktopIsolatedIdentity({ T3CODE_DESKTOP_ISOLATED_ID: "musicv10" });
+      // An ordinary bundle is full of strings like "app"; they say nothing about its identity.
+      const ordinary = 'const host = "app";const id = "t3code-desktop-build-identity:ordinary";';
+      const isolated = 'const host = "app";const id = "t3code-desktop-build-identity:musicv10";';
+      const accepted = (source: string, identity: typeof app) =>
+        verifyDesktopBundleIdentity(source, identity).pipe(
+          Effect.as(true),
+          Effect.catchTags({ DesktopIsolatedBuildError: () => Effect.succeed(false) }),
+        );
+      assert.deepStrictEqual(
+        {
+          ordinaryAsOrdinary: yield* accepted(ordinary, null),
+          isolatedAsIsolated: yield* accepted(isolated, music),
+          ordinaryAsApp: yield* accepted(ordinary, app),
+          ordinaryAsMusic: yield* accepted(ordinary, music),
+          isolatedAsOrdinary: yield* accepted(isolated, null),
+          isolatedAsAnotherId: yield* accepted(isolated, app),
+          unmarked: yield* accepted('const host = "app";', null),
+          twoMarkers: yield* accepted(`${ordinary}${isolated}`, music),
+        },
+        {
+          ordinaryAsOrdinary: true,
+          isolatedAsIsolated: true,
+          ordinaryAsApp: false,
+          ordinaryAsMusic: false,
+          isolatedAsOrdinary: false,
+          isolatedAsAnotherId: false,
+          unmarked: false,
+          twoMarkers: false,
+        },
+      );
+      assert.throws(() =>
+        resolveDesktopIsolatedIdentity({ T3CODE_DESKTOP_ISOLATED_ID: "ordinary" }),
+      );
     }),
   );
 

@@ -18,6 +18,8 @@ import {
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  desktopBuildIdentityMarker,
+  desktopBuildIdentityMarkersIn,
   desktopIsolatedIdentity,
   type DesktopIsolatedIdentity,
 } from "@t3tools/shared/desktopIsolatedIdentity";
@@ -249,6 +251,26 @@ export function resolveDesktopIsolatedIdentity(
   const id = env.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "";
   return id === "" ? null : desktopIsolatedIdentity(id);
 }
+
+/**
+ * A reused bundle must be the one built for this identity, in both directions: an ordinary bundle
+ * is never packaged as an isolated build, an isolated one never as the ordinary app or another id.
+ */
+export const verifyDesktopBundleIdentity = (
+  mainSource: string,
+  isolated: DesktopIsolatedIdentity | null,
+) =>
+  Effect.suspend(() => {
+    const expected = desktopBuildIdentityMarker(isolated);
+    const found = desktopBuildIdentityMarkersIn(mainSource);
+    return found.length === 1 && found[0] === expected
+      ? Effect.void
+      : Effect.fail(
+          new DesktopIsolatedBuildError({
+            detail: `apps/desktop/dist-electron/main.cjs carries ${found.length === 0 ? "no identity marker" : found.join(", ")}, not ${expected}; rebuild it with the same T3CODE_DESKTOP_ISOLATED_ID.`,
+          }),
+        );
+  });
 
 export class KeyringNativePackageMissingError extends Schema.TaggedError<KeyringNativePackageMissingError>()(
   "KeyringNativePackageMissingError",
@@ -3830,18 +3852,10 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     try: () => resolveDesktopIsolatedIdentity(loadRepoEnv({ repoRoot })),
     catch: (cause) => new DesktopIsolatedBuildError({ detail: String(cause) }),
   });
-  if (isolated !== null) {
-    // A reused bundle built without the same id would start as the ordinary app inside this bundle.
-    const main = yield* fs.readFileString(
-      path.join(stageAppDir, "apps/desktop/dist-electron/main.cjs"),
-    );
-    // The id is letters and digits only, so its bundled string literal needs no escaping.
-    if (!main.includes(`"${isolated.id}"`)) {
-      return yield* new DesktopIsolatedBuildError({
-        detail: `apps/desktop/dist-electron was not bundled with T3CODE_DESKTOP_ISOLATED_ID=${isolated.id}.`,
-      });
-    }
-  }
+  yield* verifyDesktopBundleIdentity(
+    yield* fs.readFileString(path.join(stageAppDir, "apps/desktop/dist-electron/main.cjs")),
+    isolated,
+  );
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");

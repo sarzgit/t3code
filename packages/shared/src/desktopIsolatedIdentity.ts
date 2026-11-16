@@ -20,10 +20,12 @@ export interface DesktopIsolatedIdentity {
 }
 
 const ID_PATTERN = /^[a-z][a-z0-9]{2,23}$/;
+const ORDINARY = "ordinary";
+const MARKER_PREFIX = "t3code-desktop-build-identity:";
 
 /** Throws for an id that can't name a scheme, bundle id and folder safely. */
 export function desktopIsolatedIdentity(id: string): DesktopIsolatedIdentity {
-  if (!ID_PATTERN.test(id)) {
+  if (!ID_PATTERN.test(id) || id === ORDINARY) {
     throw new Error(
       `Isolated desktop id "${id}" must be 3 to 24 lowercase letters or digits, starting with a letter.`,
     );
@@ -37,4 +39,27 @@ export function desktopIsolatedIdentity(id: string): DesktopIsolatedIdentity {
     userDataName: `t3code-isolated-${id}`,
     homeName: `.t3-isolated-${id}`,
   };
+}
+
+/**
+ * The string compiled into the desktop main bundle naming the identity it was built for. The
+ * packaging script requires exactly the marker it expects, so a bundle built for another identity,
+ * or before markers existed, is never packaged as this one.
+ */
+export const desktopBuildIdentityMarker = (identity: DesktopIsolatedIdentity | null) =>
+  `${MARKER_PREFIX}${identity?.id ?? ORDINARY}`;
+
+/** The identity a marker names; throws for anything that isn't a marker. */
+export function parseDesktopBuildIdentityMarker(marker: string): DesktopIsolatedIdentity | null {
+  if (!marker.startsWith(MARKER_PREFIX)) {
+    throw new Error(`"${marker}" is not a desktop build identity marker.`);
+  }
+  const id = marker.slice(MARKER_PREFIX.length);
+  return id === ORDINARY ? null : desktopIsolatedIdentity(id);
+}
+
+/** Every distinct marker in a bundle's source, in order of first appearance. */
+export function desktopBuildIdentityMarkersIn(source: string): ReadonlyArray<string> {
+  const found = source.match(/t3code-desktop-build-identity:[a-z][a-z0-9]{2,23}/g) ?? [];
+  return [...new Set(found)];
 }
