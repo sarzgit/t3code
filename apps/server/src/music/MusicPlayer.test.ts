@@ -423,17 +423,23 @@ describe("followPickedSong", () => {
       "follow",
     ],
     ["the gap before the picked song starts", fresh, stopped, 1_000, "hidden"],
-    ["another song after Music had time to switch", fresh, sample({ track: other }), 6_000, "drop"],
+    [
+      "another song after Music had time to switch",
+      fresh,
+      sample({ track: other }),
+      6_000,
+      "drop:never-started",
+    ],
     ["the picked song playing", seen, sample(), 0, "follow"],
     ["Music stopped at the end of the song", nearEnd, stopped, 0, "advance"],
     ["Music stopped mid-song", seen, stopped, 0, "follow"],
-    ["someone played another song", seen, sample({ track: other }), 0, "drop"],
+    ["someone played another song", seen, sample({ track: other }), 0, "drop:other-song"],
     [
       "Music played the same song from another playlist",
       { ...seen, musicPlaylistId: "5CA38D01224697B3" },
       sample({ playlistId: "AAAAAAAAAAAAAAAA" }),
       0,
-      "drop",
+      "drop:other-playlist",
     ],
     [
       "repeat all looped the lone song",
@@ -445,10 +451,16 @@ describe("followPickedSong", () => {
     ["repeat one looped the song", nearEnd, sample({ positionSec: 1, repeat: "one" }), 0, "follow"],
     ["watcher unavailable", seen, { _tag: "unavailable" }, 0, "follow"],
     ["permission temporarily denied", seen, { _tag: "permission-denied" }, 0, "follow"],
-    ["Music quit", seen, { _tag: "not-running" }, 0, "drop"],
+    ["Music quit", seen, { _tag: "not-running" }, 0, "drop:music-quit"],
   ] as const)("%s", (_name, picked, state, nowMs, expected) => {
     const update = MusicPlayer.followPickedSong(picked, state, nowMs);
-    assert.strictEqual(update._tag === "follow" && update.hide ? "hidden" : update._tag, expected);
+    const outcome =
+      update._tag === "drop"
+        ? `drop:${update.reason}`
+        : update._tag === "follow" && update.hide
+          ? "hidden"
+          : update._tag;
+    assert.strictEqual(outcome, expected);
   });
 
   it("starts T3's order when Music's shuffle turns on, from the current song", () => {

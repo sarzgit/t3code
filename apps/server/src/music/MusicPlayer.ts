@@ -1222,7 +1222,10 @@ const songRefsArgument = (refs: ReadonlyArray<MusicSongRef>) =>
 export type PickedSongUpdate =
   | { readonly _tag: "follow"; readonly picked: PickedSong; readonly hide: boolean }
   | { readonly _tag: "advance" }
-  | { readonly _tag: "drop" };
+  | {
+      readonly _tag: "drop";
+      readonly reason: "music-quit" | "other-song" | "never-started" | "other-playlist";
+    };
 
 /**
  * What one watcher sample means for the picked song. `hide` holds back a stopped sample
@@ -1236,25 +1239,25 @@ export function followPickedSong(
   if (state._tag === "unavailable" || state._tag === "permission-denied") {
     return { _tag: "follow", picked, hide: false };
   }
-  if (state._tag !== "ready") return { _tag: "drop" };
+  if (state._tag !== "ready") return { _tag: "drop", reason: "music-quit" };
   const track = state.playback === "stopped" ? null : state.track;
   if (!picked.seen && track?.id !== picked.trackId) {
     const settling = nowMs - picked.startedAtMs < PICK_SETTLE_MS;
-    if (track !== null && !settling) return { _tag: "drop" };
+    if (track !== null && !settling) return { _tag: "drop", reason: "never-started" };
     return { _tag: "follow", picked, hide: track === null && settling };
   }
   const nearEnd =
     picked.durationSec > 0 && picked.positionSec >= picked.durationSec - SONG_END_MARGIN_SECONDS;
   if (track === null)
     return nearEnd ? { _tag: "advance" } : { _tag: "follow", picked, hide: false };
-  if (track.id !== picked.trackId) return { _tag: "drop" };
+  if (track.id !== picked.trackId) return { _tag: "drop", reason: "other-song" };
   // The same song started from another playlist, album or Autoplay is Music's queue now.
   if (
     picked.musicPlaylistId !== null &&
     state.playlistId !== null &&
     state.playlistId !== picked.musicPlaylistId
   ) {
-    return { _tag: "drop" };
+    return { _tag: "drop", reason: "other-playlist" };
   }
   // With repeat all, Music loops a lone song instead of stopping.
   if (
@@ -1838,6 +1841,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       refs(options.wrapped),
     ]);
     const [outcome, first, pool, second] = result.split(":");
+    yield* Effect.annotateCurrentSpan("music.step.outcome", outcome);
     if (outcome === "ok" || outcome === "restart" || outcome === "end" || outcome === "exhausted") {
       sampleVersion++;
     }
@@ -1900,6 +1904,7 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       from.shuffled ? "on" : "off",
     ]);
     const [outcome, index, trackId, shuffle] = result.split(":");
+    yield* Effect.annotateCurrentSpan("music.step.outcome", outcome);
     if (outcome === "ok" || outcome === "restart" || outcome === "end") sampleVersion++;
     const nextId = persistentId(trackId);
     const now = yield* Clock.currentTimeMillis;
@@ -1936,7 +1941,16 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
             return decision.hide ? null : withPlayingFrom(state, next);
           }
           case "drop":
-            yield* setPicked(null);
+            // A rare, short span, so the trace says why T3 let go of the song it was playing.
+            yield* setPicked(null).pipe(
+              Effect.withSpan("MusicPlayer.dropPick", {
+                attributes: {
+                  "music.drop.reason": decision.reason,
+                  "music.playback": state._tag === "ready" ? state.playback : state._tag,
+                  "music.pick.seen": current.seen,
+                },
+              }),
+            );
             return state;
           case "advance":
             yield* (
