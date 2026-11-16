@@ -1934,6 +1934,24 @@ describe("MusicPlayer queue", () => {
         const restored = yield* until(statuses, (status) => status.active?.id === replacedId);
         assert.deepStrictEqual(restored.replaced, null);
         assert.strictEqual((yield* Effect.flip(player.undoReplace(undo))).reason, "queue-changed");
+
+        // The hold lasts 30 s, then Undo changes nothing.
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[2]!.id, index: 2 });
+        const late = (yield* until(statuses, (status) => status.replaced !== null)).replaced!;
+        yield* TestClock.adjust("31 seconds");
+        yield* until(statuses, (status) => status.replaced === null);
+        const expired = yield* Effect.flip(player.undoReplace(late));
+        assert.strictEqual(expired.reason, "queue-changed");
+        const after = yield* Queue.take(yield* subscribeQueue(player));
+        assert.strictEqual(after.active!.id, late.byId);
+
+        // A replaced saved queue is gone for Resume and Dismiss alike.
+        const stale = { queueId: replacedId, revision: 1 };
+        assert.strictEqual((yield* Effect.flip(player.resumeQueue(stale))).reason, "queue-changed");
+        assert.strictEqual(
+          (yield* Effect.flip(player.dismissSavedQueue(stale))).reason,
+          "queue-changed",
+        );
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
@@ -1992,6 +2010,117 @@ describe("MusicPlayer queue", () => {
         );
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
+  );
+  it.effect(
+    "settles shuffle on an edited queue: T3's writes, Music's toggles and a failed Reset",
+    () =>
+      Effect.gen(function* () {
+        const songs = queueSongs(6);
+        const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+        fake.player.shuffle = true;
+        const { sessions, runner } = yield* makeHarness({
+          respond: (args) => runFakeScript(args, fake.music),
+        });
+        yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const statuses = yield* subscribeQueue(player);
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(sessions);
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[2]!.id, index: 2 });
+          const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+          let position = 5;
+          const sample = (shuffle: boolean) =>
+            Effect.gen(function* () {
+              // Alternating playback makes every sample a state the subscriber is sent.
+              position += 1;
+              const playback = position % 2 === 0 ? "playing" : "paused";
+              session.emit(playingSample(songs[2]!.id, { shuffle, position, state: playback }));
+              yield* until(
+                received,
+                (state) =>
+                  state._tag === "ready" &&
+                  state.playback === playback &&
+                  state.shuffle === shuffle,
+              );
+            });
+          yield* sample(true);
+          yield* until(statuses, (status) => status.active?.revision === 1);
+          yield* player.editQueue({
+            queueId: id,
+            expectedRevision: 1,
+            sourceCount: 6,
+            edit: {
+              _tag: "play-next",
+              songs: [{ playlistId: PLAYLIST_ID, trackId: songs[5]!.id, index: 5 }],
+            },
+          });
+          const view = () => player.getQueue({ queueId: id });
+          const order = Effect.map(view(), (queue) => ({
+            revision: queue.revision,
+            upcoming: queue.upcoming.map((entry) => entry.key),
+          }));
+          // Paused, Music ignores shuffle writes, so every write below fails to take.
+          fake.player.state = "paused";
+
+          // T3's own toggle reorders once; samples still showing the old flag are not a toggle.
+          yield* player.control({ _tag: "set-shuffle", enabled: false });
+          const off = yield* order;
+          assert.strictEqual(off.revision, 3);
+          yield* sample(true);
+          assert.deepStrictEqual(yield* order, off);
+          // The write never took: at the deadline Music's flag wins, with one corrective reorder.
+          yield* TestClock.adjust("6 seconds");
+          yield* sample(true);
+          const corrected = yield* order;
+          assert.strictEqual(corrected.revision, 4);
+          yield* sample(true);
+          assert.deepStrictEqual(yield* order, corrected);
+          // A toggle made in Music between accepted samples reorders once.
+          yield* sample(false);
+          const musicOff = yield* order;
+          // Off: added songs first by ordinal, then the rest in playlist order.
+          assert.deepStrictEqual(musicOff, {
+            revision: 5,
+            upcoming: ["a0", "s0", "s1", "s3", "s4", "s5"],
+          });
+          yield* sample(false);
+          assert.deepStrictEqual(yield* order, musicOff);
+          yield* sample(true);
+          assert.strictEqual((yield* order).revision, 6);
+
+          // Reset with a write that never takes keeps plain source order and never reshuffles.
+          const reset = yield* player.editQueue({
+            queueId: id,
+            expectedRevision: 6,
+            edit: { _tag: "reset" },
+          });
+          assert.deepStrictEqual(reset, { id, revision: 7 });
+          const sourceOrder = { revision: 7, upcoming: ["s3", "s4", "s5"] };
+          assert.deepStrictEqual(yield* order, sourceOrder);
+          // Off again only retries the Reset's write.
+          yield* player.control({ _tag: "set-shuffle", enabled: false });
+          assert.deepStrictEqual(yield* order, sourceOrder);
+          yield* TestClock.adjust("6 seconds");
+          yield* sample(true);
+          assert.deepStrictEqual(yield* order, sourceOrder);
+          assert.isTrue((yield* view()).edited);
+
+          // An edit before the late acknowledgement revokes the handoff; the edit still stands.
+          yield* player.editQueue({
+            queueId: id,
+            expectedRevision: 7,
+            edit: { _tag: "remove", targets: [{ key: "s4", trackId: songs[4]!.id }] },
+          });
+          const edited = { revision: 8, upcoming: ["s3", "s5"] };
+          assert.deepStrictEqual(yield* order, edited);
+          yield* sample(false);
+          assert.deepStrictEqual(yield* order, edited);
+          assert.isTrue((yield* view()).edited);
+          // That sample ended the Reset's wait, so the next change is an ordinary toggle.
+          yield* sample(true);
+          assert.strictEqual((yield* order).revision, 9);
+        }).pipe(providePlayer(runner), Effect.scoped);
+      }),
   );
 });
 
