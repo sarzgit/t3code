@@ -596,6 +596,14 @@ const CONTROL_SCRIPT = `function run(argv) {
     case "shuffle-on": Music.shuffleEnabled = true; break;
     case "shuffle-off": Music.shuffleEnabled = false; break;
     case "seek": Music.playerPosition = Number(argv[1]); break;
+    // Resume only: the saved song's length is often unknown until Music has it playing.
+    case "seek-before-end": {
+      const duration = Number(Music.currentTrack.duration());
+      const position = Number(argv[1]);
+      if (!(duration > 0) || position >= duration - Number(argv[2])) return "end";
+      Music.playerPosition = position;
+      break;
+    }
     case "volume": Music.soundVolume = Number(argv[1]); break;
     // Music ignores repeat changes unless a song is playing.
     case "repeat": Music.songRepeat = argv[1]; break;
@@ -2932,16 +2940,17 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     forgetPending();
     unavailableKeys = new Set();
     const durationSec = song.meta?.durationSec ?? 0;
-    const seek =
+    const wanted =
       state.positionSec > RESUME_MIN_SECONDS &&
       (durationSec === 0 || state.positionSec < durationSec - RESUME_TAIL_SECONDS);
-    if (seek) {
-      yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [
-        "seek",
+    const seek =
+      wanted &&
+      (yield* runScript("control", "JavaScript", CONTROL_SCRIPT, [
+        "seek-before-end",
         String(state.positionSec),
-      ]).pipe(Effect.ignore);
-      yield* Ref.set(seekSinceSample, { positionSec: state.positionSec, atMs: now });
-    }
+        String(RESUME_TAIL_SECONDS),
+      ]).pipe(Effect.orElseSucceed(() => "failed"))) === "ok";
+    if (seek) yield* Ref.set(seekSinceSample, { positionSec: state.positionSec, atMs: now });
     yield* Ref.set(picked, seek ? { ...pick, positionSec: state.positionSec } : pick);
     yield* commit(
       {

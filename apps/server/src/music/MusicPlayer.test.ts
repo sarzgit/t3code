@@ -226,7 +226,7 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
     play: () => {
       player.state = "playing";
     },
-    currentTrack: { persistentID: () => player.current },
+    currentTrack: { persistentID: () => player.current, duration: () => 200 },
     currentPlaylist: { persistentID: () => player.playlist },
     stop: () => {
       played.push("stop");
@@ -1768,7 +1768,11 @@ describe("MusicPlayer queue", () => {
         assert.strictEqual(stale.reason, "queue-changed");
         yield* player.resumeQueue({ queueId: saved.id, revision: 1 });
         assert.strictEqual(fake.played.at(-1), `${songs[2]!.id}#2`);
-        assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), ["seek", "42"]);
+        assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), [
+          "seek-before-end",
+          "42",
+          "10",
+        ]);
         const resumed = (yield* until(statuses, (status) => status.active !== null)).active;
         assert.deepStrictEqual(resumed, {
           id: saved.id,
@@ -1844,7 +1848,7 @@ describe("MusicPlayer queue", () => {
 
   it.effect("resumes an unedited queue's song where its playlist moved it, never another", () =>
     Effect.gen(function* () {
-      for (const change of ["moved", "missing"] as const) {
+      for (const change of ["moved", "missing", "tail"] as const) {
         const songs = queueSongs(4);
         const fake = fakeMusic({ [PLAYLIST_ID]: songs });
         const first = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
@@ -1869,7 +1873,7 @@ describe("MusicPlayer queue", () => {
         if (change === "moved") {
           songs[1]!.id = songs[3]!.id;
           songs[3]!.id = saved;
-        } else {
+        } else if (change === "missing") {
           songs[1]!.id = "FFFF000000000001";
         }
         const second = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
@@ -1878,10 +1882,20 @@ describe("MusicPlayer queue", () => {
           const statuses = yield* subscribeQueue(player);
           const card = (yield* Queue.take(statuses)).saved!;
           const resume = player.resumeQueue({ queueId: card.id, revision: card.revision });
-          if (change === "moved") {
+          if (change === "tail") {
+            // Saved in the song's last ten seconds: it starts again rather than ending at once.
+            fake.player.position = 0;
+            yield* resume;
+            assert.strictEqual(fake.played.at(-1), `${saved}#1`);
+            assert.strictEqual(fake.player.position, 0);
+          } else if (change === "moved") {
             yield* resume;
             assert.strictEqual(fake.played.at(-1), `${saved}#3`);
-            assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), ["seek", "61"]);
+            assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), [
+              "seek-before-end",
+              "61",
+              "10",
+            ]);
             const active = (yield* until(statuses, (status) => status.active !== null)).active!;
             assert.strictEqual(active.currentKey, "s3");
           } else {
@@ -1894,7 +1908,51 @@ describe("MusicPlayer queue", () => {
             assert.strictEqual(missing.id, card.id);
           }
         }).pipe(
-          providePlayer(second.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
+          providePlayer(
+            second.runner,
+            "darwin",
+            undefined,
+            MusicQueueStore.layerMemory(
+              change === "tail" && files.position !== null
+                ? { ...files, position: { ...files.position, positionSec: 195 } }
+                : files,
+            ),
+          ),
+          Effect.scoped,
+        );
+      }
+    }),
+  );
+
+  it.effect("resumes mid-song where it was, but never into a song's last ten seconds", () =>
+    Effect.gen(function* () {
+      const { songs, fake, files } = yield* savedEditedQueue();
+      // The saved entry is a playlist song, so nothing stored says how long it is.
+      for (const [positionSec, seeks] of [
+        [42, true],
+        [192, false],
+      ] as const) {
+        const restarted = yield* makeHarness({
+          respond: (args) => runFakeScript(args, fake.music),
+        });
+        yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const statuses = yield* subscribeQueue(player);
+          const card = (yield* Queue.take(statuses)).saved!;
+          fake.player.position = 0;
+          yield* player.resumeQueue({ queueId: card.id, revision: card.revision });
+          assert.strictEqual(fake.played.at(-1), `${songs[2]!.id}#2`);
+          assert.strictEqual(fake.player.position, seeks ? positionSec : 0, String(positionSec));
+        }).pipe(
+          providePlayer(
+            restarted.runner,
+            "darwin",
+            undefined,
+            MusicQueueStore.layerMemory({
+              ...files,
+              position: files.position === null ? null : { ...files.position, positionSec },
+            }),
+          ),
           Effect.scoped,
         );
       }
@@ -2003,7 +2061,11 @@ describe("MusicPlayer queue", () => {
         const undo = { replacedId, replacedRevision: 1, byId: active!.id, byRevision: 0 };
         assert.deepStrictEqual(yield* player.undoReplace(undo), { id: replacedId, revision: 1 });
         assert.strictEqual(fake.played.at(-1), `${songs[0]!.id}#0`);
-        assert.deepStrictEqual((yield* Ref.get(calls)).at(-1)!.slice(5), ["seek", "30"]);
+        assert.deepStrictEqual((yield* Ref.get(calls)).at(-1)!.slice(5), [
+          "seek-before-end",
+          "30",
+          "10",
+        ]);
         const restored = yield* until(statuses, (status) => status.active?.id === replacedId);
         assert.deepStrictEqual(restored.replaced, null);
         assert.strictEqual((yield* Effect.flip(player.undoReplace(undo))).reason, "queue-changed");
