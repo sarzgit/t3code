@@ -46,6 +46,10 @@ import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
+import {
+  desktopIsolatedIdentity,
+  type DesktopIsolatedIdentity,
+} from "@t3tools/shared/desktopIsolatedIdentity";
 
 const ignoreWebLinks = DesktopWebLinks.DesktopWebLinks.of({
   receive: () => Effect.void,
@@ -67,6 +71,7 @@ const layerDesktopClerk = (
   listeners = new Map<string, (...args: unknown[]) => void>(),
   userDataDirectoryOverride: Option.Option<string> = Option.none(),
   baseDir = "/tmp/home/.t3",
+  isolatedIdentity: Option.Option<DesktopIsolatedIdentity> = Option.none(),
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: clerkStateDir,
@@ -77,6 +82,7 @@ const layerDesktopClerk = (
     baseDir,
     platform,
     userDataDirectoryOverride,
+    isolatedIdentity,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   const electronApp = {
@@ -161,18 +167,24 @@ describe("DesktopClerk", () => {
       userDataDirectoryOverride: Option.some("/task/chromium-user-data"),
     },
     {
-      // Beside the user's real app of the same name: no shared Keychain item, before the lock.
-      name: "a packaged task profile",
+      name: "an isolated build's task profile",
       isDevelopment: false,
       platform: "darwin" as const,
       userData: "/task/chromium-user-data",
       userDataDirectoryOverride: Option.some("/task/chromium-user-data"),
       baseDir: "/task/t3-home",
-      switches: ["appendSwitch:use-mock-keychain"],
+      isolatedIdentity: Option.some(desktopIsolatedIdentity("musictest")),
     },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",
-    ({ isDevelopment, platform, userData, userDataDirectoryOverride, baseDir, switches }) => {
+    ({
+      isDevelopment,
+      platform,
+      userData,
+      userDataDirectoryOverride,
+      baseDir,
+      isolatedIdentity,
+    }) => {
       const events: string[] = [];
       storageMock.mockReturnValue(storageAdapter);
       createClerkBridgeMock.mockImplementation(() => {
@@ -192,6 +204,7 @@ describe("DesktopClerk", () => {
               undefined,
               userDataDirectoryOverride,
               baseDir,
+              isolatedIdentity,
             ),
           ),
         ),
@@ -199,7 +212,6 @@ describe("DesktopClerk", () => {
 
       assert.deepEqual(events, [
         `setPath:userData:${userData}`,
-        ...(switches ?? []),
         "requestSingleInstanceLock",
         "on:second-instance",
         "on:open-url",
@@ -209,6 +221,15 @@ describe("DesktopClerk", () => {
         [{ path: NodePath.join(NodePath.resolve(clerkStateDir), "clerk") }],
       ]);
       assert.notStrictEqual(createClerkBridgeMock.mock.calls[0]?.[0]?.storage, storageAdapter);
+      // Clerk registers this scheme as the default handler for its OAuth callback.
+      assert.strictEqual(
+        createClerkBridgeMock.mock.calls[0]?.[0]?.renderer?.scheme,
+        isDevelopment
+          ? "t3code-dev"
+          : Option.isSome(isolatedIdentity ?? Option.none())
+            ? "t3code-isolated-musictest"
+            : "t3code",
+      );
     },
   );
 

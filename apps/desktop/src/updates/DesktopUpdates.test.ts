@@ -24,6 +24,7 @@ import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
+import { desktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
 
 type ReleaseFeed = Parameters<typeof computeReleaseNotes>[2];
 type RunningVersion = Parameters<typeof computeReleaseNotes>[0];
@@ -102,28 +103,40 @@ describe("DesktopUpdates", () => {
     }),
   );
 
-  it.effect("keeps the disabled reason available after configuration and channel changes", () => {
-    const harness = makeHarness({ env: { T3CODE_DISABLE_AUTO_UPDATE: "true" } });
-    const reason = "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.";
+  it.effect.each([
+    {
+      options: { env: { T3CODE_DISABLE_AUTO_UPDATE: "true" } },
+      reason: "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.",
+    },
+    {
+      // An update is an ordinary build and would give the copy the installed app's identity.
+      options: { isolatedIdentity: desktopIsolatedIdentity("musictest") },
+      reason: "This isolated build never updates itself.",
+    },
+  ])(
+    "keeps the disabled reason available after configuration and channel changes ($reason)",
+    ({ options, reason }) => {
+      const harness = makeHarness(options);
 
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const updates = yield* DesktopUpdates.DesktopUpdates;
-        yield* updates.configure;
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          yield* updates.configure;
 
-        const configured = yield* updates.getState;
-        assert.equal(configured.message, reason);
+          const configured = yield* updates.getState;
+          assert.equal(configured.message, reason);
 
-        const changed = yield* updates.setChannel("nightly");
-        assert.equal(changed.channel, "nightly");
-        assert.equal(changed.enabled, false);
-        assert.equal(changed.status, "disabled");
-        assert.equal(changed.message, reason);
-        assert.equal(harness.sentStates.at(-1)?.message, reason);
-        assert.equal(harness.checkCount(), 0);
-      }),
-    ).pipe(Effect.provide(harness.layer));
-  });
+          const changed = yield* updates.setChannel("nightly");
+          assert.equal(changed.channel, "nightly");
+          assert.equal(changed.enabled, false);
+          assert.equal(changed.status, "disabled");
+          assert.equal(changed.message, reason);
+          assert.equal(harness.sentStates.at(-1)?.message, reason);
+          assert.equal(harness.checkCount(), 0);
+        }),
+      ).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("checks for newer releases after an update has been downloaded", () => {
     const harness = makeHarness();

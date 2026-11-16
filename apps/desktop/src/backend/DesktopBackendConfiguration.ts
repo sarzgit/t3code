@@ -28,6 +28,7 @@ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 
 export class DesktopBackendObservabilitySettingsReadError extends Schema.TaggedError<DesktopBackendObservabilitySettingsReadError>()(
   "DesktopBackendObservabilitySettingsReadError",
@@ -515,6 +516,13 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       desktopTelemetryFd: 4,
       desktopTelemetryControlFd: 5,
       desktopAppUpdate: input.desktopAppUpdate,
+      // An isolated build's renderer runs on its own scheme; ordinary origins are built in.
+      ...Option.match(environment.isolatedIdentity, {
+        onNone: () => ({}),
+        onSome: (identity) => ({
+          desktopRendererOrigin: `${identity.scheme}://${ElectronProtocol.DESKTOP_HOST}`,
+        }),
+      }),
       desktopBrowserFd: 6,
       desktopBrowserControlFd: 7,
       ...Option.match(input.resourceMonitorPath, {

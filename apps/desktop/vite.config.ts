@@ -24,6 +24,10 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+  // Packaged builds only; scripts/build-desktop-artifact.ts derives the bundle from the same id.
+  __T3CODE_BUILD_DESKTOP_ISOLATED_ID__: JSON.stringify(
+    repoEnv.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "",
+  ),
 };
 
 export default defineConfig({

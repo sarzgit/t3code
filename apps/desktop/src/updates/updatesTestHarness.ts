@@ -17,6 +17,7 @@ import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import type { DesktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
 
 export const flushCallbacks = Effect.yieldNow;
 
@@ -40,6 +41,7 @@ export interface UpdatesHarnessOptions {
   readonly installRecord?: string | undefined;
   readonly policy?: DesktopUpdatePolicy.UpdatePolicy;
   readonly appVersion?: string;
+  readonly isolatedIdentity?: DesktopIsolatedIdentity | null;
   /** Starts from in-memory settings with this track saved, as after a restart. */
   readonly savedChannel?: DesktopAppSettings.DesktopSettings["updateChannel"];
   /** Adds a WSL backend beside the primary, as on a Windows host with WSL enabled. */
@@ -183,6 +185,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   );
 
   const layerEnvironment = DesktopEnvironment.layer({
+    isolatedIdentity: options.isolatedIdentity ?? null,
     dirname: "/repo/apps/desktop/src",
     homeDirectory: `/tmp/t3-desktop-updates-home-${process.pid}`,
     platform: options.platform ?? "darwin",

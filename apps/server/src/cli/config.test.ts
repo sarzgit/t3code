@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import { assert, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -53,6 +54,7 @@ const minimalDesktopFlags = (baseDir: string) => ({
 });
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
+const decodeDesktopBootstrap = Schema.decodeExit(DesktopBackendBootstrap);
 const encodeUnknownJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const makeDesktopBootstrap = (
@@ -466,8 +468,18 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           otlpTracesUrl: "http://localhost:4318/v1/traces",
           otlpMetricsUrl: "http://localhost:4318/v1/metrics",
           otlpLogsUrl: "http://localhost:4318/v1/logs",
+          desktopRendererOrigin: "t3code-isolated-musictest://app",
         }),
       );
+      // Only an isolated desktop build's own scheme can be handed over as a trusted origin.
+      for (const origin of ["https://example.com", "t3code://app", "t3code-isolated-x://app"]) {
+        expect(
+          Exit.isFailure(
+            decodeDesktopBootstrap(makeDesktopBootstrap({ desktopRendererOrigin: origin })),
+          ),
+          origin,
+        ).toBe(true);
+      }
 
       const resolved = yield* resolveServerConfig(
         { ...minimalDesktopFlags(baseDir), bootstrapFd: Option.some(fd) },
@@ -482,6 +494,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       );
 
       expect(resolved).toMatchObject({
+        desktopRendererOrigin: "t3code-isolated-musictest://app",
         otlpTracesUrl: "http://localhost:4318/v1/traces",
         otlpTracesSource: "bootstrap",
         otlpMetricsSource: "bootstrap",

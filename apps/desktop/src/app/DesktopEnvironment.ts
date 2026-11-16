@@ -12,6 +12,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import type { DesktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
+import { BUILD_ISOLATED_IDENTITY } from "./DesktopBuildIdentity.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
@@ -28,6 +30,8 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  /** Defaults to the identity the bundle was built with; tests pass one. */
+  readonly isolatedIdentity?: DesktopIsolatedIdentity | null;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -45,6 +49,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly homeDirectory: string;
     readonly appDataDirectory: string;
     readonly userDataDirectoryOverride: Option.Option<string>;
+    /** Set only in a packaged build made to run beside the installed app; see DesktopBuildIdentity. */
+    readonly isolatedIdentity: Option.Option<DesktopIsolatedIdentity>;
     readonly baseDir: string;
     readonly stateDir: string;
     readonly desktopSettingsPath: string;
@@ -157,10 +163,19 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
+  const isolatedIdentity = isDevelopment
+    ? Option.none<DesktopIsolatedIdentity>()
+    : Option.fromNullishOr(
+        input.isolatedIdentity === undefined ? BUILD_ISOLATED_IDENTITY : input.isolatedIdentity,
+      );
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
+    ...Option.match(isolatedIdentity, {
+      onNone: () => ({}),
+      onSome: (identity) => ({ defaultName: identity.homeName }),
+    }),
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -172,7 +187,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     isDevelopment,
     appVersion: input.appVersion,
   });
-  const displayName = branding.displayName;
+  const displayName = Option.match(isolatedIdentity, {
+    onNone: () => branding.displayName,
+    onSome: (identity) => identity.productName,
+  });
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment,
@@ -198,6 +216,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     appDataDirectory,
     userDataDirectoryOverride: config.userDataDirectoryOverride,
+    isolatedIdentity,
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),

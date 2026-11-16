@@ -86,11 +86,17 @@ substantial disk space before pruning.
 Never run a development server against the live `~/.t3/userdata`.
 `--home-dir` does not move the dev desktop's Chromium profile, which every dev desktop on the
 machine shares. Set `T3CODE_DESKTOP_USER_DATA_DIR` to an absolute path to give one run its own
-profile and single-instance lock. A packaged build accepts it only as a separate task profile:
-outside `~/Library/Application Support` (or the platform's equivalent) and `~/.t3`, with its own
-`T3CODE_HOME` that neither contains nor sits inside the profile. That run uses Chromium's mock
-keychain so it never touches the installed app's Keychain item. It still shares the app's bundle
-id and URL scheme, so don't open `t3code://` links while it runs beside the installed app.
+profile and single-instance lock. An ordinary packaged build refuses it.
+
+To run a packaged macOS build beside the installed app, build it with
+`T3CODE_DESKTOP_ISOLATED_ID=<id>` (3 to 24 lowercase letters or digits). That one id gives the
+copy its own bundle id, app name (so its own Keychain item for Chromium's key), URL scheme
+`t3code-isolated-<id>` (the app origin and Clerk's sign-in callback), Chromium profile and default
+`~/.t3-isolated-<id>` home. It advertises no `t3code`, `http` or `https` handler and never updates
+itself. Such a build also accepts `T3CODE_DESKTOP_USER_DATA_DIR` as a task profile outside the
+application data folder and `~/.t3`, paired with a separate T3 home. Links that name `t3code://`,
+such as pairing or hosted ChatGPT sign-in, still open the installed app, and Clerk sign-in needs
+the isolated scheme allowed as a redirect for that Clerk instance.
 See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
 
 Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,

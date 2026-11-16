@@ -31,6 +31,10 @@ export const DesktopBackendBootstrap = Schema.Struct({
   desktopBrowserFd: Schema.optionalKey(PositiveInt),
   desktopBrowserControlFd: Schema.optionalKey(PositiveInt),
   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),
+  // An isolated desktop build's own renderer origin; ordinary desktop origins are built in.
+  desktopRendererOrigin: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^t3code-isolated-[a-z][a-z0-9]{2,23}:\/\/app$/)),
+  ),
 });
 
 export type DesktopBackendBootstrap = typeof DesktopBackendBootstrap.Type;

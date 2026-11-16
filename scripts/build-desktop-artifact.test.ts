@@ -29,6 +29,7 @@ import {
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
+  resolveDesktopIsolatedIdentity,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -551,6 +552,94 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ),
       ),
     ),
+  );
+
+  it.effect("builds an isolated macOS copy that claims none of the installed app's identity", () =>
+    Effect.gen(function* () {
+      const build = (isolated: ReturnType<typeof resolveDesktopIsolatedIdentity>) =>
+        createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.10-nightly.20261116.10",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+          isolated,
+        );
+      const identity = resolveDesktopIsolatedIdentity({ T3CODE_DESKTOP_ISOLATED_ID: " musicv10 " });
+      const isolated = yield* build(identity);
+      const mac = isolated.mac as { extendInfo: Record<string, unknown>; protocols: unknown };
+      assert.deepStrictEqual(
+        {
+          appId: isolated.appId,
+          productName: isolated.productName,
+          publish: isolated.publish,
+          protocols: mac.protocols,
+          documentTypes: mac.extendInfo.CFBundleDocumentTypes,
+        },
+        {
+          appId: "com.t3tools.t3code.isolated.musicv10",
+          productName: "T3 Code Isolated (musicv10)",
+          publish: null,
+          protocols: [
+            { name: "T3 Code Isolated (musicv10)", schemes: ["t3code-isolated-musicv10"] },
+          ],
+          documentTypes: undefined,
+        },
+      );
+
+      // Without the id nothing changes.
+      const ordinary = yield* build(null);
+      const ordinaryMac = ordinary.mac as {
+        extendInfo: Record<string, unknown>;
+        protocols: unknown;
+      };
+      assert.strictEqual(ordinary.appId, "com.t3tools.t3code");
+      assert.strictEqual(ordinary.productName, "T3 Code (Nightly)");
+      assert.deepStrictEqual(ordinaryMac.protocols, [
+        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
+      ]);
+      assert.isArray(ordinaryMac.extendInfo.CFBundleDocumentTypes);
+      assert.isNull(resolveDesktopIsolatedIdentity({}));
+
+      for (const id of ["Music v10", "music-v10", "1music", "ab"]) {
+        assert.throws(() => resolveDesktopIsolatedIdentity({ T3CODE_DESKTOP_ISOLATED_ID: id }), id);
+      }
+      const linux = yield* Effect.flip(
+        createBuildConfig(
+          "linux",
+          "AppImage",
+          "0.1.10",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "x64",
+          identity,
+        ),
+      );
+      assert.strictEqual(linux._tag, "DesktopIsolatedBuildError");
+      const passkeys = yield* Effect.flip(
+        createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.10",
+          true,
+          false,
+          undefined,
+          { entitlementsPath: "/e.plist", provisioningProfilePath: "/p.provisionprofile" },
+          false,
+          "arm64",
+          identity,
+        ),
+      );
+      assert.strictEqual(passkeys._tag, "DesktopIsolatedBuildError");
+    }),
   );
 
   it.effect("names the Electron window class in the Linux desktop entry", () =>

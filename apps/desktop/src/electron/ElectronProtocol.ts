@@ -12,12 +12,23 @@ import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
 
+import type { DesktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
+import { BUILD_ISOLATED_IDENTITY } from "../app/DesktopBuildIdentity.ts";
+
 export const DESKTOP_HOST = "app";
 const DESKTOP_PRODUCTION_SCHEME = "t3code";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
-export function getDesktopScheme(isDevelopment: boolean): string {
-  return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
+/**
+ * The app origin's scheme, which Clerk also registers for its OAuth callback. An isolated build
+ * uses its own, so it never claims the installed app's `t3code` links.
+ */
+export function getDesktopScheme(
+  isDevelopment: boolean,
+  isolated: DesktopIsolatedIdentity | null = BUILD_ISOLATED_IDENTITY,
+): string {
+  if (isDevelopment) return DESKTOP_DEVELOPMENT_SCHEME;
+  return isolated?.scheme ?? DESKTOP_PRODUCTION_SCHEME;
 }
 
 function getDesktopOrigin(isDevelopment: boolean): string {

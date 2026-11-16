@@ -101,6 +101,8 @@ export class ServerConfig extends Context.Service<
     readonly desktopTelemetryFd?: number | undefined;
     readonly desktopTelemetryControlFd?: number | undefined;
     readonly desktopAppUpdate?: boolean | undefined;
+    /** Trusted like the built-in desktop origins; only an isolated desktop build sends one. */
+    readonly desktopRendererOrigin?: string | undefined;
     readonly desktopBrowserFd?: number | undefined;
     readonly desktopBrowserControlFd?: number | undefined;
     readonly resourceMonitorPath?: string | undefined;

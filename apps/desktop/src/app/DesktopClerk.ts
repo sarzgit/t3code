@@ -85,7 +85,7 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
     : __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
 
-function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean, userDataPath: string) {
+function createDesktopClerkBridge(stateDir: string, scheme: string, userDataPath: string) {
   return createClerkBridge({
     storage: openClerkTokenStorage(
       stateDir,
@@ -94,8 +94,9 @@ function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean, user
     ),
     manageSingleInstanceLock: false,
     passkeys: true,
+    // Clerk registers this scheme as the default handler for its OAuth callback.
     renderer: {
-      scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+      scheme,
       host: ElectronProtocol.DESKTOP_HOST,
     },
   });
@@ -110,11 +111,6 @@ export const make = Effect.gen(function* () {
   // Must not yield: the bridge registers a scheme Electron rejects once ready.
   const userDataPath = yield* DesktopUserData.resolveUserDataPath(environment);
   yield* electronApp.setPath("userData", userDataPath);
-  // A packaged task profile is a throwaway copy beside the user's real app with the same name;
-  // its Chromium encryption must not read, prompt for or create the real app's Keychain item.
-  if (environment.isPackaged && Option.isSome(environment.userDataDirectoryOverride)) {
-    yield* electronApp.appendCommandLineSwitch("use-mock-keychain");
-  }
 
   // Clerk skips the profile lock on macOS. Interrupt before runtime construction because quit is asynchronous.
   if (!(yield* electronApp.requestSingleInstanceLock)) {
@@ -147,7 +143,14 @@ export const make = Effect.gen(function* () {
   yield* Effect.acquireRelease(
     Effect.try({
       try: () =>
-        createDesktopClerkBridge(environment.stateDir, environment.isDevelopment, userDataPath),
+        createDesktopClerkBridge(
+          environment.stateDir,
+          ElectronProtocol.getDesktopScheme(
+            environment.isDevelopment,
+            Option.getOrNull(environment.isolatedIdentity),
+          ),
+          userDataPath,
+        ),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
           stateDir: environment.stateDir,

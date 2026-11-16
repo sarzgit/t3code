@@ -17,6 +17,10 @@ import {
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  desktopIsolatedIdentity,
+  type DesktopIsolatedIdentity,
+} from "@t3tools/shared/desktopIsolatedIdentity";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -223,6 +227,27 @@ export class MacPasskeySigningConfigurationResolutionError extends Schema.Tagged
   override get message(): string {
     return "Failed to resolve macOS passkey signing configuration.";
   }
+}
+
+export class DesktopIsolatedBuildError extends Schema.TaggedError<DesktopIsolatedBuildError>()(
+  "DesktopIsolatedBuildError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return `Isolated desktop build: ${this.detail}`;
+  }
+}
+
+/**
+ * T3CODE_DESKTOP_ISOLATED_ID builds a copy that runs beside the installed app: its own bundle id,
+ * name (and so Keychain item), URL scheme (and so Clerk callback), profile and T3 home. The desktop
+ * bundle reads the same variable at bundle time (apps/desktop/vite.config.ts).
+ */
+export function resolveDesktopIsolatedIdentity(
+  env: Readonly<Record<string, string | undefined>>,
+): DesktopIsolatedIdentity | null {
+  const id = env.T3CODE_DESKTOP_ISOLATED_ID?.trim() ?? "";
+  return id === "" ? null : desktopIsolatedIdentity(id);
 }
 
 export class KeyringNativePackageMissingError extends Schema.TaggedError<KeyringNativePackageMissingError>()(
@@ -963,6 +988,7 @@ interface ResolvedBuildOptions {
 
 interface StagePackageJson {
   readonly name: string;
+  readonly productName?: string;
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
@@ -2781,11 +2807,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  isolated: DesktopIsolatedIdentity | null = null,
 ) {
+  if (isolated !== null && (platform !== "mac" || macPasskeySigning !== undefined)) {
+    return yield* new DesktopIsolatedBuildError({
+      detail: "only unsigned-passkey macOS builds are supported.",
+    });
+  }
+  const productName = isolated?.productName ?? resolveDesktopProductName(version);
   const buildConfig: Record<string, unknown> = {
     afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
+    appId: isolated?.appId ?? DESKTOP_APP_ID,
+    productName,
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
@@ -2814,7 +2847,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const updateChannel = resolveDesktopUpdateChannel(version);
   // Missing publish config infers a GitHub feed from tokens; staging has no repository, so manifest generation would crash.
   buildConfig.publish = null;
-  if (!isDesktopPreviewVersion(version)) {
+  // No update feed: an update is an ordinary build and would take over the installed app's identity.
+  if (isolated === null && !isDesktopPreviewVersion(version)) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
       buildConfig.publish = [publishConfig];
@@ -2856,26 +2890,34 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           "T3 Code controls the Music app for the sidebar player, and lets commands run by terminals and coding agents control other apps.",
         // macOS lists an app under Default web browser only when it opens web
         // pages as documents as well as http and https links (see protocols).
-        CFBundleDocumentTypes: [
-          {
-            CFBundleTypeName: "Web page",
-            CFBundleTypeRole: "Viewer",
-            LSHandlerRank: "Alternate",
-            LSItemContentTypes: ["public.html", "public.xhtml"],
-          },
-        ],
+        ...(isolated === null
+          ? {
+              CFBundleDocumentTypes: [
+                {
+                  CFBundleTypeName: "Web page",
+                  CFBundleTypeRole: "Viewer",
+                  LSHandlerRank: "Alternate",
+                  LSItemContentTypes: ["public.html", "public.xhtml"],
+                },
+              ],
+            }
+          : {}),
       },
-      protocols: [
-        {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
-        },
-        {
-          name: "Web site URL",
-          schemes: ["http", "https"],
-          role: "Viewer",
-        },
-      ],
+      // An isolated build claims only its own scheme: never t3code, and never a browser.
+      protocols:
+        isolated === null
+          ? [
+              {
+                name: "T3 Code",
+                schemes: ["t3code", "t3code-dev"],
+              },
+              {
+                name: "Web site URL",
+                schemes: ["http", "https"],
+                role: "Viewer",
+              },
+            ]
+          : [{ name: isolated.productName, schemes: [isolated.scheme] }],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
@@ -2889,7 +2931,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac" && target === "dmg") {
     buildConfig.dmg = {
       // Finder caches DMG backgrounds by volume name; give each installer its own.
-      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      title: `${productName} ${version} Installer`,
       background: `dmg/dmg-background-${updateChannel}.png`,
       window: {
         width: 640,
@@ -3784,6 +3826,21 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
+  const isolated = yield* Effect.try({
+    try: () => resolveDesktopIsolatedIdentity(loadRepoEnv({ repoRoot })),
+    catch: (cause) => new DesktopIsolatedBuildError({ detail: String(cause) }),
+  });
+  if (isolated !== null) {
+    // A reused bundle built without the same id would start as the ordinary app inside this bundle.
+    const main = yield* fs.readFileString(
+      path.join(stageAppDir, "apps/desktop/dist-electron/main.cjs"),
+    );
+    if (!main.includes(JSON.stringify(isolated.id))) {
+      return yield* new DesktopIsolatedBuildError({
+        detail: `apps/desktop/dist-electron was not bundled with T3CODE_DESKTOP_ISOLATED_ID=${isolated.id}.`,
+      });
+    }
+  }
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
@@ -3904,6 +3961,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       : undefined;
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
+    // Electron's first app name, before the main process sets it, is this one.
+    ...(isolated === null ? {} : { productName: isolated.productName }),
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
@@ -3932,6 +3991,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      isolated,
     ),
     dependencies: stageDependencies,
     devDependencies: {

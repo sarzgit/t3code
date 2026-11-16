@@ -343,9 +343,14 @@ function getAutoUpdateDisabledReason(args: {
   isDebPackage: boolean;
   disabledByEnv: boolean;
   hasUpdateFeedConfig: boolean;
+  isolated: boolean;
 }): string | null {
   if (args.policy.mode === "off") {
     return args.policy.message ?? "Updates are turned off on this machine.";
+  }
+  // An update is an ordinary build; installing one would give this copy the installed app's identity.
+  if (args.isolated) {
+    return "This isolated build never updates itself.";
   }
   if (!args.hasUpdateFeedConfig) {
     return "Automatic updates are not available because no update feed is configured.";
@@ -477,6 +482,7 @@ export const make = Effect.gen(function* () {
         isDebPackage,
         disabledByEnv: config.disableAutoUpdate,
         hasUpdateFeedConfig: hasFeedConfig,
+        isolated: Option.isSome(environment.isolatedIdentity),
       }),
     );
   });

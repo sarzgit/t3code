@@ -773,6 +773,7 @@ export const make = Effect.gen(function* () {
   const trustedBrowserOrigins = new Set<string>([
     ...(config.devUrl ? [config.devUrl.origin] : []),
     ...DESKTOP_RENDERER_ORIGINS,
+    ...(config.desktopRendererOrigin === undefined ? [] : [config.desktopRendererOrigin]),
     ...config.devAllowedOrigins,
   ]);
 

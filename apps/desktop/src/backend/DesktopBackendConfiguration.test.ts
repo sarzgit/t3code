@@ -23,6 +23,10 @@ import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+import {
+  desktopIsolatedIdentity,
+  type DesktopIsolatedIdentity,
+} from "@t3tools/shared/desktopIsolatedIdentity";
 
 const layerShellEnvironment = (prepared = true) =>
   Layer.succeed(DesktopShellEnvironment.DesktopShellEnvironment, {
@@ -67,9 +71,11 @@ function layerEnvironment(
     readonly otlpTracesUrl?: string;
     readonly otlpMetricsUrl?: string;
     readonly otlpLogsUrl?: string;
+    readonly isolatedIdentity?: DesktopIsolatedIdentity | null;
   },
 ) {
   return DesktopEnvironment.layer({
+    isolatedIdentity: options?.isolatedIdentity ?? null,
     dirname: options?.dirname ?? "/repo/apps/desktop/src",
     homeDirectory: baseDir,
     platform: options?.platform ?? "darwin",
@@ -109,6 +115,7 @@ const withHarness = <A, E, R>(
     | DesktopBackendConfiguration.DesktopBackendConfiguration
   >,
   prepared = true,
+  isolatedIdentity: DesktopIsolatedIdentity | null = null,
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -123,7 +130,7 @@ const withHarness = <A, E, R>(
           Layer.provideMerge(DesktopAppSettings.layerTest()),
           Layer.provideMerge(DesktopWslEnvironment.layerTest()),
           Layer.provideMerge(DesktopWslServerTree.layerTest()),
-          Layer.provideMerge(layerEnvironment(baseDir)),
+          Layer.provideMerge(layerEnvironment(baseDir, { isolatedIdentity })),
         ),
       ),
     );
@@ -269,7 +276,20 @@ describe("DesktopBackendConfiguration", () => {
           yield* configuration.currentBootstrapToken,
           first.bootstrap.desktopBootstrapToken,
         );
+        assert.notProperty(first.bootstrap, "desktopRendererOrigin");
       }),
+    ),
+  );
+
+  it.effect("hands an isolated build's renderer origin to its own backend", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const primary = yield* configuration.resolvePrimary;
+        assert.equal(primary.bootstrap.desktopRendererOrigin, "t3code-isolated-musictest://app");
+      }),
+      true,
+      desktopIsolatedIdentity("musictest"),
     ),
   );
 

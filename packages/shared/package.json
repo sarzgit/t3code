@@ -247,6 +247,10 @@
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
     },
+    "./desktopIsolatedIdentity": {
+      "types": "./src/desktopIsolatedIdentity.ts",
+      "import": "./src/desktopIsolatedIdentity.ts"
+    },
     "./musicGlobalShortcuts": {
       "types": "./src/musicGlobalShortcuts.ts",
       "import": "./src/musicGlobalShortcuts.ts"

@@ -17,6 +17,7 @@ const resolveWindowsUserData = (appDataDirectory: string) =>
     userDataDirectoryOverride: Option.none(),
     homeDirectory: "/Users/alice",
     baseDir: "/Users/alice/.t3",
+    isolatedIdentity: Option.none(),
   }).pipe(Effect.provide(DesktopPreReadyFileSystem.layer));
 
 it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {

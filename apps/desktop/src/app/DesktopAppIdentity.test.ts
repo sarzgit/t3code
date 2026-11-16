@@ -14,6 +14,9 @@ import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { desktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
+
+const MUSIC_TEST = desktopIsolatedIdentity("musictest");
 
 const defaultEnvironmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -207,15 +210,19 @@ describe("DesktopAppIdentity", () => {
       },
     },
     {
-      name: "a packaged build without its own T3 home",
-      env: { T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data" },
+      name: "an ordinary packaged build, even with its own T3 home",
+      env: {
+        T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
+        T3CODE_HOME: "/task/t3-home",
+      },
     },
     {
-      name: "a packaged build on the default T3 home",
+      name: "an isolated build on the default T3 home",
       env: {
         T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
         T3CODE_HOME: "/Users/alice/.t3",
       },
+      isolatedIdentity: MUSIC_TEST,
     },
     ...[
       "/Users/alice/Library/Application Support/t3code-v2",
@@ -224,40 +231,74 @@ describe("DesktopAppIdentity", () => {
       "/task/t3-home/chromium",
       "/task",
     ].map((profile) => ({
-      name: `a packaged build sharing a location (${profile})`,
+      name: `an isolated build sharing a location (${profile})`,
       env: { T3CODE_DESKTOP_USER_DATA_DIR: profile, T3CODE_HOME: "/task/t3-home" },
+      isolatedIdentity: MUSIC_TEST,
     })),
-  ])("refuses a profile override for $name instead of using the shared profile", ({ env }) =>
-    withIdentity(
-      Effect.gen(function* () {
-        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
-        const error = yield* Effect.flip(identity.resolveUserDataPath);
-        assert.equal(error.operation, "validate-override");
-      }),
-      { environment: { env } },
-    ),
+  ])(
+    "refuses a profile override for $name instead of using the shared profile",
+    ({ env, isolatedIdentity }) =>
+      withIdentity(
+        Effect.gen(function* () {
+          const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+          const error = yield* Effect.flip(identity.resolveUserDataPath);
+          assert.equal(error.operation, "validate-override");
+        }),
+        { environment: { env, isolatedIdentity: isolatedIdentity ?? null } },
+      ),
   );
 
-  it.effect("selects a packaged task profile paired with its own T3 home, probing nothing", () =>
-    withIdentity(
+  it.effect("gives an isolated build its own profile, T3 home and app name", () => {
+    const calls: ElectronAppCalls = { setAboutPanelOptions: [], setDockIcon: [], setName: [] };
+    return withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
-        assert.equal(yield* identity.resolveUserDataPath, "/task/chromium-user-data");
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        yield* identity.configure;
+        assert.deepEqual(
+          {
+            profile: yield* identity.resolveUserDataPath,
+            home: environment.baseDir,
+            name: calls.setName[0],
+            about: calls.setAboutPanelOptions[0]?.applicationName,
+          },
+          {
+            profile: "/Users/alice/Library/Application Support/t3code-isolated-musictest",
+            home: "/Users/alice/.t3-isolated-musictest",
+            name: "T3 Code Isolated musictest",
+            about: "T3 Code Isolated (musictest)",
+          },
+        );
       }),
       {
+        calls,
+        // Its own folder: neither the shipping profile nor a legacy one is looked at.
         legacyPathProbeError: PlatformError.badArgument({
           module: "FileSystem",
           method: "exists",
           description: "the shared profile must not be probed",
         }),
-        environment: {
-          env: {
-            T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
-            T3CODE_HOME: "/task/t3-home",
+        environment: { isolatedIdentity: MUSIC_TEST },
+      },
+    );
+  });
+
+  // Without T3CODE_HOME it pairs with the build's own home, which is never the installed app's.
+  it.effect.each([{ T3CODE_HOME: "/task/t3-home" }, {}])(
+    "selects an isolated build's task profile beside a separate T3 home (%o)",
+    (home) =>
+      withIdentity(
+        Effect.gen(function* () {
+          const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+          assert.equal(yield* identity.resolveUserDataPath, "/task/chromium-user-data");
+        }),
+        {
+          environment: {
+            env: { T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data", ...home },
+            isolatedIdentity: MUSIC_TEST,
           },
         },
-      },
-    ),
+      ),
   );
 
   it.effect.each([

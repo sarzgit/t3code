@@ -92,8 +92,12 @@ export const make = Effect.gen(function* () {
   const configure = Effect.gen(function* () {
     const commitHash = yield* resolveAboutCommitHash;
     // Electron strips spaces but keeps parentheses in its User-Agent token, breaking Turnstile in preview sessions.
+    // An isolated build's own name also names its own Keychain item for Chromium's encryption key.
     yield* electronApp.setName(
-      `${environment.branding.baseName} ${environment.branding.stageLabel}`,
+      Option.match(environment.isolatedIdentity, {
+        onNone: () => `${environment.branding.baseName} ${environment.branding.stageLabel}`,
+        onSome: (identity) => identity.appName,
+      }),
     );
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,

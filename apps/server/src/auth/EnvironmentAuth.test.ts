@@ -613,12 +613,45 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         expect(otherPort._tag).toBe("ServerAuthInvalidCredentialError");
         const opaque = yield* Effect.flip(upgrade({ origin: "null" }));
         expect(opaque._tag).toBe("ServerAuthInvalidCredentialError");
+        // An isolated desktop build's origin counts only for the backend that build started.
+        const isolated = yield* Effect.flip(upgrade({ origin: "t3code-isolated-musictest://app" }));
+        expect(isolated._tag).toBe("ServerAuthInvalidCredentialError");
       }).pipe(
         Effect.provide(
           layerEnvironmentAuth({
             mode: "web",
             host: "192.168.1.50",
             devUrl: new URL("http://localhost:5733"),
+          }),
+        ),
+      ),
+    );
+
+    it.effect("trusts the renderer origin an isolated desktop build hands its backend", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const pairing = yield* serverAuth.issuePairingCredential();
+        const exchanged = yield* serverAuth.createBrowserSession(
+          pairing.credential,
+          requestMetadata,
+        );
+        const upgrade = (origin: string) =>
+          serverAuth.authenticateWebSocketUpgrade(
+            {
+              url: "/ws",
+              cookies: { [sessions.cookieName]: exchanged.sessionToken },
+              headers: { host: "127.0.0.1:3773", origin },
+            } as never,
+            "rpc",
+          );
+        yield* upgrade("t3code-isolated-musictest://app");
+        const other = yield* Effect.flip(upgrade("t3code-isolated-other://app"));
+        expect(other._tag).toBe("ServerAuthInvalidCredentialError");
+      }).pipe(
+        Effect.provide(
+          layerEnvironmentAuth({
+            desktopRendererOrigin: "t3code-isolated-musictest://app",
           }),
         ),
       ),

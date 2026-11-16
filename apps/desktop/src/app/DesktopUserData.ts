@@ -1,3 +1,4 @@
+import type { DesktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -45,9 +46,9 @@ const isWithin = (path: Path.Path, parent: string, child: string) => {
 };
 
 /**
- * Which override problem refuses it, if any. A packaged build takes one only as a fully separate
- * task profile: absolute, outside the shared profiles' folder and the default T3 home, and paired
- * with its own explicit T3 home, so lock, Chromium state and T3 state all stay apart.
+ * Why an override is refused, if it is. Only an isolated packaged build takes one, as a profile
+ * outside the application data folder and `~/.t3` beside its own T3 home; an ordinary packaged
+ * build shares its name and Keychain item with the installed app.
  */
 const overrideProblem = (
   path: Path.Path,
@@ -57,10 +58,12 @@ const overrideProblem = (
     readonly isDevelopment: boolean;
     readonly homeDirectory: string;
     readonly baseDir: string;
+    readonly isolatedIdentity: Option.Option<DesktopIsolatedIdentity>;
   },
 ) => {
   if (!path.isAbsolute(override)) return "NotAbsolute";
   if (input.isDevelopment) return null;
+  if (Option.isNone(input.isolatedIdentity)) return "PackagedBuild";
   const defaultHome = path.join(input.homeDirectory, ".t3");
   const home = path.normalize(input.baseDir);
   if (!path.isAbsolute(home) || isWithin(path, defaultHome, home)) return "PackagedNeedsOwnT3Home";
@@ -84,6 +87,7 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly userDataDirectoryOverride: Option.Option<string>;
     readonly homeDirectory: string;
     readonly baseDir: string;
+    readonly isolatedIdentity: Option.Option<DesktopIsolatedIdentity>;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -100,6 +104,10 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
         });
       }
       return path.normalize(override);
+    }
+    // Its own folder, never a migration from the installed app's profiles.
+    if (Option.isSome(input.isolatedIdentity)) {
+      return path.join(input.appDataDirectory, input.isolatedIdentity.value.userDataName);
     }
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
