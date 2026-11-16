@@ -252,8 +252,16 @@ const makeWriter = Effect.fn("MusicQueueStore.makeWriter")(function* <E>(
     Effect.suspend(() => {
       const next = pending;
       pending = null;
-      return next === null ? Effect.void : write(next);
-    }).pipe(Effect.catchCause((cause) => Effect.logWarning("music queue write failed", { cause }))),
+      if (next === null) return Effect.void;
+      return write(next).pipe(
+        Effect.catchCause((cause) =>
+          Effect.sync(() => {
+            // The next write carries what failed; anything queued since is newer and wins.
+            pending = { ...next, ...pending };
+          }).pipe(Effect.andThen(Effect.logWarning("music queue write failed", { cause }))),
+        ),
+      );
+    }),
   );
   const enqueue = (change: Pending) =>
     Effect.suspend(() => {

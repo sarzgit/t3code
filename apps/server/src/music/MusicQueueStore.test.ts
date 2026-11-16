@@ -143,6 +143,59 @@ describe("MusicQueueStore", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("writes a body that failed on the next write, never over a newer one", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-music-queue-" });
+      const first = explicitBody(2);
+      const newer = explicitBody(3);
+      yield* withStore(
+        baseDir,
+        Effect.gen(function* () {
+          const store = yield* Store.MusicQueueStore;
+          const paths = yield* files;
+          // A folder where the body goes makes that one write fail.
+          yield* fileSystem.makeDirectory(paths.body, { recursive: true });
+          yield* store.saveBody(first, position(first, { positionSec: 0 }));
+          yield* store.settled;
+          yield* fileSystem.remove(paths.body, { recursive: true });
+          // The next checkpoint carries the unsaved body with it.
+          yield* store.savePosition(position(first, { positionSec: 20 }));
+          yield* store.settled;
+        }),
+      );
+      const reloaded = yield* withStore(
+        baseDir,
+        Effect.flatMap(Store.MusicQueueStore, (store) => store.load),
+      );
+      assert.deepStrictEqual(reloaded.body, first);
+      assert.strictEqual(reloaded.position?.positionSec, 20);
+
+      // A Clear that fails is not replayed over a queue saved after it.
+      yield* withStore(
+        baseDir,
+        Effect.gen(function* () {
+          const store = yield* Store.MusicQueueStore;
+          const paths = yield* files;
+          yield* fileSystem.remove(paths.body);
+          yield* fileSystem.makeDirectory(paths.body);
+          yield* fileSystem.writeFileString(`${paths.body}/blocker`, "x");
+          yield* store.clear;
+          yield* store.settled;
+          yield* fileSystem.remove(paths.body, { recursive: true });
+          yield* store.saveBody(newer, position(newer, { positionSec: 5 }));
+          yield* store.settled;
+        }),
+      );
+      const latest = yield* withStore(
+        baseDir,
+        Effect.flatMap(Store.MusicQueueStore, (store) => store.load),
+      );
+      assert.deepStrictEqual(latest.body, newer);
+      assert.strictEqual(latest.position?.positionSec, 5);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("moves a corrupt or newer body aside and starts empty", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
