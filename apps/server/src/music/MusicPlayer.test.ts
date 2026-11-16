@@ -1957,6 +1957,13 @@ describe("MusicPlayer queue", () => {
           );
           // Taking it back plays nothing and seeks nothing.
           assert.deepStrictEqual(yield* Ref.get(restarted.calls), []);
+          if (!adopted) {
+            yield* player.dismissSavedQueue({ queueId: saved.id, revision: saved.revision });
+            assert.isNull((yield* Queue.take(yield* subscribeQueue(player))).saved);
+            const store = yield* MusicQueueStore.MusicQueueStore;
+            yield* store.settled;
+            assert.isNull((yield* store.load).body);
+          }
         }).pipe(
           providePlayer(restarted.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
           Effect.scoped,
