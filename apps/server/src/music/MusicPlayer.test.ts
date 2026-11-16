@@ -2010,6 +2010,49 @@ describe("MusicPlayer queue", () => {
     }),
   );
 
+  it.effect("saves a seek made while paused, and only for T3's own song", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(3);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      const files = {
+        body: null as MusicQueueStore.QueueBody | null,
+        position: null as MusicQueueStore.QueuePosition | null,
+      };
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const store = yield* MusicQueueStore.MusicQueueStore;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 });
+        yield* until(statuses, (status) => status.active !== null);
+        session.emit(playingSample(songs[0]!.id, { position: 30 }));
+        yield* Queue.take(received);
+        session.emit(playingSample(songs[0]!.id, { position: 31, state: "paused" }));
+        yield* until(received, (state) => state._tag === "ready" && state.playback === "paused");
+        yield* store.settled;
+        // Paused, nothing else would write it until play resumes; a restart's Resume uses it.
+        yield* player.control({ _tag: "seek", positionSec: 55 });
+        yield* store.settled;
+        assert.strictEqual(files.position?.positionSec, 55);
+        // Once Music plays something else, a seek there is not T3's to save.
+        session.emit(playingSample(songs[2]!.id, { position: 5, playlistId: "other" }));
+        yield* until(statuses, (status) => status.active === null);
+        yield* store.settled;
+        const saved = files.position?.positionSec;
+        yield* player.control({ _tag: "seek", positionSec: 99 });
+        yield* store.settled;
+        assert.strictEqual(files.position?.positionSec, saved);
+      }).pipe(
+        providePlayer(runner, "darwin", undefined, MusicQueueStore.layerMemory({}, { files })),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("leaves a queue restored from disk a Resume card, whatever Music plays", () =>
     Effect.gen(function* () {
       // A: the queue as its server left it after shutting down, on s2 at 0:42.

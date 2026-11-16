@@ -2448,6 +2448,12 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
       );
       const atMs = yield* Clock.currentTimeMillis;
       yield* Ref.set(seekSinceSample, { positionSec: input.positionSec, atMs });
+      // Music took the seek; when it is T3's own song, save it now: paused, nothing else would.
+      const current = queue;
+      const pick = yield* Ref.get(picked);
+      if (current !== null && current.active && pick !== null && pick.trackId === current.trackId) {
+        yield* commit({ ...current, positionSec: input.positionSec }, "position");
+      }
     }
   }, pickLock.withPermits(1));
 
