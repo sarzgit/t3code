@@ -219,6 +219,13 @@ function fakeMusic(lists: Record<string, ReadonlyArray<FakeSong>>) {
       if (player.state === "playing") player.shuffle = value === true;
     },
     songRepeat: () => player.repeat,
+    soundVolume: () => 50,
+    pause: () => {
+      player.state = "paused";
+    },
+    play: () => {
+      player.state = "playing";
+    },
     currentTrack: { persistentID: () => player.current },
     currentPlaylist: { persistentID: () => player.playlist },
     stop: () => {
@@ -2011,6 +2018,80 @@ describe("MusicPlayer queue", () => {
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );
+  it.effect("steps an edited queue back, wraps it under repeat all and holds for an agent", () =>
+    Effect.gen(function* () {
+      const songs = queueSongs(3);
+      const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      const { sessions, runner } = yield* makeHarness({
+        respond: (args) => runFakeScript(args, fake.music),
+      });
+      yield* Effect.gen(function* () {
+        const player = yield* MusicPlayer.MusicPlayer;
+        const statuses = yield* subscribeQueue(player);
+        const { received } = yield* subscribe(player);
+        const session = yield* Queue.take(sessions);
+        yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[0]!.id, index: 0 });
+        const { id } = (yield* until(statuses, (status) => status.active !== null)).active!;
+        session.emit(playingSample(songs[0]!.id));
+        yield* Queue.take(received);
+        yield* player.editQueue({
+          queueId: id,
+          expectedRevision: 0,
+          sourceCount: 3,
+          edit: {
+            _tag: "add",
+            songs: [{ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 }],
+          },
+        });
+        const at = (key: string) => until(statuses, (status) => status.active?.currentKey === key);
+        yield* player.control({ _tag: "next" });
+        yield* at("s1");
+        // Early in a song Previous goes back an entry; later it restarts the song.
+        fake.player.position = 1;
+        yield* player.control({ _tag: "previous" });
+        assert.strictEqual(fake.played.at(-1), `${songs[0]!.id}#0`);
+        yield* at("s0");
+        fake.player.position = 10;
+        const before = fake.played.length;
+        yield* player.control({ _tag: "previous" });
+        assert.strictEqual(fake.played.length, before);
+        assert.strictEqual(fake.player.position, 0);
+
+        // Repeat all wraps from the last entry, the added copy of s1, back to the first.
+        fake.player.repeat = "all";
+        for (const key of ["s1", "s2", "a0"]) {
+          yield* player.control({ _tag: "next" });
+          yield* at(key);
+        }
+        yield* player.control({ _tag: "next" });
+        assert.strictEqual(fake.played.at(-1), `${songs[0]!.id}#0`);
+        yield* at("s0");
+
+        // An agent's pause holds the queue even when a sample lands at the song's end.
+        fake.player.state = "playing";
+        session.emit(playingSample(songs[0]!.id, { position: 20, repeat: "all" }));
+        yield* until(received, (state) => state._tag === "ready" && state.positionSec === 20);
+        yield* player.observeAgents(
+          {
+            requestIds: new Set(["request"]),
+            workingProjectIds: new Set(),
+            preexisting: new Set(),
+          },
+          "pause",
+        );
+        assert.strictEqual(fake.player.state, "paused");
+        const played = fake.played.length;
+        session.emit(
+          playingSample(songs[0]!.id, { state: "paused", position: 199, repeat: "all" }),
+        );
+        yield* until(received, (state) => state._tag === "ready" && state.playback === "paused");
+        assert.strictEqual(fake.played.length, played);
+        const now = yield* Queue.take(yield* subscribeQueue(player));
+        assert.strictEqual(now.active?.currentKey, "s0");
+      }).pipe(providePlayer(runner), Effect.scoped);
+    }),
+  );
+
   it.effect(
     "settles shuffle on an edited queue: T3's writes, Music's toggles and a failed Reset",
     () =>
