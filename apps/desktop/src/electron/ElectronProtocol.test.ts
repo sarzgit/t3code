@@ -16,6 +16,8 @@ vi.mock("electron", () => ({
   protocol: { handle: handleMock, unhandle: unhandleMock },
 }));
 
+import { desktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
+
 import * as ElectronProtocol from "./ElectronProtocol.ts";
 
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
@@ -25,6 +27,24 @@ describe("ElectronProtocol", () => {
     handleMock.mockReset();
     netFetchMock.mockReset();
     unhandleMock.mockReset();
+  });
+
+  it("registers the app origin's own scheme as privileged before ready", () => {
+    const schemes = (isolated: Parameters<typeof ElectronProtocol.desktopPrivilegedSchemes>[0]) =>
+      ElectronProtocol.desktopPrivilegedSchemes(isolated).map(({ scheme, privileges }) => ({
+        scheme,
+        standard: privileges?.standard,
+        secure: privileges?.secure,
+      }));
+    assert.deepStrictEqual(schemes(null), [
+      { scheme: "t3code", standard: true, secure: true },
+      { scheme: "t3code-dev", standard: true, secure: true },
+    ]);
+    // Privileges only shape the origin; they claim no link handler in LaunchServices.
+    assert.deepStrictEqual(schemes(desktopIsolatedIdentity("musictest")), [
+      { scheme: "t3code-isolated-musictest", standard: true, secure: true },
+      { scheme: "t3code-dev", standard: true, secure: true },
+    ]);
   });
 
   it.effect("serves the bundled client from disk without a backend", () =>

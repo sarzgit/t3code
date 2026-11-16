@@ -136,11 +136,13 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
   });
 }
 
-// Must run synchronously before Electron emits ready.
-function registerDesktopSchemePrivilegesSync(): void {
-  Electron.protocol.registerSchemesAsPrivileged([
+/** The custom schemes registered before ready; an isolated build's app origin uses its own. */
+export function desktopPrivilegedSchemes(
+  isolated: DesktopIsolatedIdentity | null = BUILD_ISOLATED_IDENTITY,
+): Array<Electron.CustomScheme> {
+  return [
     {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
+      scheme: getDesktopScheme(false, isolated),
       privileges: {
         standard: true,
         secure: true,
@@ -161,7 +163,12 @@ function registerDesktopSchemePrivilegesSync(): void {
         stream: true,
       },
     },
-  ]);
+  ];
+}
+
+// Must run synchronously before Electron emits ready.
+function registerDesktopSchemePrivilegesSync(): void {
+  Electron.protocol.registerSchemesAsPrivileged(desktopPrivilegedSchemes());
 }
 
 const registerDesktopSchemePrivileges = Effect.sync(registerDesktopSchemePrivilegesSync).pipe(
