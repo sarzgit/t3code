@@ -60,6 +60,7 @@ import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.t
 import * as MiniPlayerWindow from "./music/MiniPlayerWindow.ts";
 import * as MusicGlobalShortcuts from "./music/MusicGlobalShortcuts.ts";
 import * as DesktopSnapShot from "./snapShot/DesktopSnapShot.ts";
+import * as DesktopShortcutRecording from "./app/DesktopShortcutRecording.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopPreReadyFileSystem from "./app/DesktopPreReadyFileSystem.ts";
 import * as DesktopPreReadyPlatform from "./app/DesktopPreReadyPlatform.ts";
@@ -186,6 +187,7 @@ const layerDesktopWindow = DesktopWindow.layer.pipe(
 const layerDesktopSnapShot = DesktopSnapShot.layer.pipe(
   Layer.provideMerge(layerDesktopWindow),
   Layer.provideMerge(layerDesktopFoundation),
+  Layer.provideMerge(DesktopShortcutRecording.layer),
 );
 const layerMusicMiniPlayer = MiniPlayerWindow.layer.pipe(
   Layer.provideMerge(layerDesktopWindow),
@@ -193,6 +195,7 @@ const layerMusicMiniPlayer = MiniPlayerWindow.layer.pipe(
 );
 const layerMusicGlobalShortcuts = MusicGlobalShortcuts.layer.pipe(
   Layer.provideMerge(layerMusicMiniPlayer),
+  Layer.provideMerge(DesktopShortcutRecording.layer),
 );
 const layerDesktopAppActivation = DesktopAppActivation.layer.pipe(
   Layer.provide(layerDesktopWindow),

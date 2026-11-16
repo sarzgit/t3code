@@ -40,6 +40,7 @@ import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as MiniPlayerWindow from "../music/MiniPlayerWindow.ts";
 import * as MusicGlobalShortcuts from "../music/MusicGlobalShortcuts.ts";
+import * as DesktopShortcutRecording from "./DesktopShortcutRecording.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -171,6 +172,10 @@ it.effect.each([false, true])(
           Effect.provideService(MusicGlobalShortcuts.MusicGlobalShortcuts, {
             initialize: Effect.void,
           } as MusicGlobalShortcuts.MusicGlobalShortcuts["Service"]),
+          Effect.provideService(
+            DesktopShortcutRecording.DesktopShortcutRecording,
+            {} as DesktopShortcutRecording.DesktopShortcutRecording["Service"],
+          ),
           Effect.provideService(DesktopState.DesktopState, {
             quitting,
           } as DesktopState.DesktopState["Service"]),
@@ -242,6 +247,7 @@ it.effect.each([false, true])(
             Layer.mock(MacPermissions.MacPermissions, {}),
             Layer.mock(MiniPlayerWindow.MusicMiniPlayerWindow, {}),
             Layer.mock(MusicGlobalShortcuts.MusicGlobalShortcuts, {}),
+            Layer.mock(DesktopShortcutRecording.DesktopShortcutRecording, {}),
             Layer.mock(PreviewManager.PreviewManager, {
               isBrowserPartition: () => {
                 throw new Error("unexpected browser partition lookup");

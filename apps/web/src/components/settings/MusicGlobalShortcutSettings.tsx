@@ -14,7 +14,7 @@ import {
   type MusicGlobalShortcutIssue,
 } from "@t3tools/shared/musicGlobalShortcuts";
 import { XIcon } from "lucide-react";
-import { type KeyboardEvent, useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import { updateClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { snapShotKeybindingConflict } from "../../lib/snapShotShortcut";
@@ -57,6 +57,18 @@ const selectSettings = (settings: ClientSettings) => ({
 });
 
 /** Desktop only, and only while the player drives a Mac; a remote browser never sees it. */
+/** Ends this view's recording once, keeping the shell's answer for later status reads. */
+function endRecording(
+  bridge: DesktopBridge["musicGlobalShortcuts"],
+  holding: { current: boolean },
+  released: { current: Promise<unknown> },
+  setStatus: (status: MusicGlobalShortcutStatus) => void,
+) {
+  if (!holding.current) return;
+  holding.current = false;
+  released.current = bridge.setRecording(false).then(setStatus, () => undefined);
+}
+
 export function MusicGlobalShortcutSettings() {
   const bridge = window.desktopBridge?.musicGlobalShortcuts;
   const environmentId = useMusicEnvironmentId();
@@ -77,7 +89,12 @@ function MusicGlobalShortcutRows({ bridge }: { bridge: DesktopBridge["musicGloba
   } | null>(null);
   const savedIssues = musicGlobalShortcutIssues(bindings, settings.snapShotShortcut, apple);
 
-  const refreshStatus = () => bridge.getStatus().then(setStatus, () => setStatus({}));
+  // Ending a recording re-registers T3's keys; status read before that would show none held.
+  const released = useRef<Promise<unknown>>(Promise.resolve());
+  const holding = useRef(false);
+  const release = () => endRecording(bridge, holding, released, setStatus);
+  const refreshStatus = () =>
+    released.current.then(() => bridge.getStatus()).then(setStatus, () => setStatus({}));
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads which keys the desktop shell holds; it registers them outside React
   useEffect(() => {
     let active = true;
@@ -94,11 +111,10 @@ function MusicGlobalShortcutRows({ bridge }: { bridge: DesktopBridge["musicGloba
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the shell holds T3's global keys; it lets them go while a key is recorded so the press reaches this recorder
   useEffect(() => {
     if (!isRecording) return;
+    holding.current = true;
     void bridge.setRecording(true).catch(() => undefined);
-    return () => {
-      void bridge.setRecording(false).catch(() => undefined);
-    };
-  }, [bridge, isRecording]);
+    return () => endRecording(bridge, holding, released, setStatus);
+  }, [bridge, isRecording, holding, released]);
 
   const save = async (next: ClientSettings["musicGlobalShortcuts"]) => {
     await updateClientSettings({ musicGlobalShortcuts: next });
@@ -107,6 +123,7 @@ function MusicGlobalShortcutRows({ bridge }: { bridge: DesktopBridge["musicGloba
 
   const record = (action: MusicGlobalShortcutAction, shortcut: KeybindingShortcut) => {
     setRecording(null);
+    release();
     const issue = musicGlobalShortcutCandidateIssue(
       action,
       shortcut,

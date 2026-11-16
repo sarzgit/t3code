@@ -1193,7 +1193,8 @@ export interface DesktopBridge {
   /** Desktop-wide music keys. Only the main window reads status; both windows receive actions. */
   musicGlobalShortcuts: {
     getStatus: () => Promise<MusicGlobalShortcutStatus>;
-    setRecording: (recording: boolean) => Promise<void>;
+    /** Resolves with the keys held once the change has been applied. */
+    setRecording: (recording: boolean) => Promise<MusicGlobalShortcutStatus>;
     onAction: (listener: (action: MusicGlobalShortcutAction) => void) => () => void;
   };
 }

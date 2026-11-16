@@ -63,7 +63,7 @@ function setup(options: { readonly canControl: boolean; readonly environmentId: 
   const listeners = new Set<(action: MusicGlobalShortcutAction) => void>();
   const musicGlobalShortcuts: DesktopBridge["musicGlobalShortcuts"] = {
     getStatus: async () => ({}),
-    setRecording: async () => undefined,
+    setRecording: async () => ({}),
     onAction: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

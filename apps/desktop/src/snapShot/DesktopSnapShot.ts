@@ -39,6 +39,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Electron from "electron";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopShortcutRecording from "../app/DesktopShortcutRecording.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -759,6 +760,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const permissions = yield* MacPermissions.MacPermissions;
   const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
+  const recordings = yield* DesktopShortcutRecording.DesktopShortcutRecording;
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   // Never the mini-player: results and permission helpers belong to the main window.
@@ -826,6 +828,9 @@ export const make = Effect.gen(function* () {
     path.join(__dirname, "snapShot", "RegionSnapShotWorker.cjs"),
   );
   let registeredAccelerator: string | undefined;
+  // While a Settings recorder is open the OS key is let go; observers and portals don't take keys.
+  let recordingKeys = false;
+  let acceleratorDeferred = false;
   let initialized = false;
   let portalShortcut: PortalCaptureShortcut | undefined;
   let shortcutGeneration = 0;
@@ -1346,8 +1351,14 @@ export const make = Effect.gen(function* () {
       );
     } else {
       const accelerator = toElectronAccelerator(shortcut);
-      registered = Electron.globalShortcut.register(accelerator, onCurrentShortcut);
-      if (registered) registeredAccelerator = accelerator;
+      if (recordingKeys) {
+        // Registered, and its status set truthfully, once recording ends.
+        acceleratorDeferred = true;
+        registered = true;
+      } else {
+        registered = Electron.globalShortcut.register(accelerator, onCurrentShortcut);
+        if (registered) registeredAccelerator = accelerator;
+      }
     }
 
     yield* Ref.set(stateRef, {
@@ -1599,6 +1610,25 @@ export const make = Effect.gen(function* () {
     if (result.backupPath) shortcutVerified = false;
     return result;
   });
+
+  yield* recordings.onChange((recording) =>
+    configurationMutex.withPermits(1)(
+      Effect.gen(function* () {
+        recordingKeys = recording;
+        if (recording) {
+          if (registeredAccelerator !== undefined) {
+            Electron.globalShortcut.unregister(registeredAccelerator);
+            registeredAccelerator = undefined;
+            acceleratorDeferred = true;
+          }
+          return;
+        }
+        if (!acceleratorDeferred) return;
+        acceleratorDeferred = false;
+        yield* applySettings(yield* Ref.get(settingsRef), null, true);
+      }),
+    ),
+  );
 
   return DesktopSnapShot.of({
     initialize: configurationMutex.withPermits(1)(

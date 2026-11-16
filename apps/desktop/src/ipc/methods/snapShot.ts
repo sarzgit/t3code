@@ -21,6 +21,7 @@ import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as DesktopSnapShot from "../../snapShot/DesktopSnapShot.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
+import * as DesktopShortcutRecording from "../../app/DesktopShortcutRecording.ts";
 
 class SnapShotIpcUnauthorizedSenderError extends Schema.TaggedError<SnapShotIpcUnauthorizedSenderError>()(
   "SnapShotIpcUnauthorizedSenderError",
@@ -158,6 +159,8 @@ export const setSnapShotShortcutSuppressed = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.snapShot.setShortcutSuppressed")(function* (suppressed, event) {
     yield* ensureTrustedSnapShotSender(event);
     yield* (yield* DesktopSnapShot.DesktopSnapShot).setShortcutSuppressed(suppressed);
+    // Recording a Snap Shot key also lets go of T3's music keys, and the other way round.
+    yield* (yield* DesktopShortcutRecording.DesktopShortcutRecording).set("snapShot", suppressed);
   }),
 });
 

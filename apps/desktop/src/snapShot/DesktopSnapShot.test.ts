@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 import type * as Electron from "electron";
 import type { PortalShortcutState } from "./PortalCaptureShortcut.ts";
 import { beforeEach, vi } from "vite-plus/test";
+import * as DesktopShortcutRecording from "../app/DesktopShortcutRecording.ts";
 
 beforeEach(() => {
   portalShortcutInstances.length = 0;
@@ -519,6 +520,7 @@ const layerTest = (
           } as unknown as DesktopWindow.DesktopWindow["Service"]),
         ),
         ElectronWindow.layer.pipe(Layer.provide(Layer.succeed(HostProcess.Platform, platform))),
+        DesktopShortcutRecording.layer,
         FileSystem.layerNoop(fileSystemOverrides),
         Path.layer,
         Layer.succeed(
@@ -1851,6 +1853,49 @@ it.effect("an unrelated client-setting change keeps the registered shortcut", ()
         registerShortcutMock.mock.calls.map(([accelerator]) => accelerator),
         ["Control+Alt+K", "Control+Alt+J"],
       );
+    }),
+  ).pipe(Effect.provide(layerTest("win32")));
+});
+
+it.effect("lets go of its key while either Settings recorder is open", () => {
+  registerShortcutMock.mockReset().mockReturnValue(true);
+  unregisterShortcutMock.mockReset();
+  const settings = enabledSettings({
+    snapShotShortcut: {
+      key: "k",
+      metaKey: false,
+      ctrlKey: true,
+      shiftKey: false,
+      altKey: true,
+      modKey: false,
+    },
+  });
+
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* DesktopSnapShot.make;
+      const recordings = yield* DesktopShortcutRecording.DesktopShortcutRecording;
+      yield* service.configure(settings);
+      for (const recorder of ["music", "snapShot"] as const) {
+        registerShortcutMock.mockClear();
+        unregisterShortcutMock.mockClear();
+        yield* recordings.set(recorder, true);
+        assert.deepEqual(unregisterShortcutMock.mock.calls, [["Control+Alt+K"]], recorder);
+        // A save while recording registers nothing until recording ends.
+        yield* service.configure({
+          ...settings,
+          snapShotShortcut: { ...settings.snapShotShortcut, key: "j" },
+        });
+        yield* service.configure(settings);
+        assert.lengthOf(registerShortcutMock.mock.calls, 0, recorder);
+        yield* recordings.set(recorder, false);
+        assert.deepEqual(
+          registerShortcutMock.mock.calls.map(([accelerator]) => accelerator),
+          ["Control+Alt+K"],
+          recorder,
+        );
+        assert.isTrue((yield* service.state).shortcutRegistered);
+      }
     }),
   ).pipe(Effect.provide(layerTest("win32")));
 });

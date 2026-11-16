@@ -42,10 +42,18 @@ const chord = (key: string, modifiers: Partial<KeybindingShortcut> = {}): Keybin
   ...modifiers,
 });
 
-function setup() {
+function setup(
+  options: {
+    readonly status?: MusicGlobalShortcutStatus;
+    /** What the shell holds once it takes the keys back after recording. */
+    readonly afterRelease?: MusicGlobalShortcutStatus;
+    readonly release?: Promise<void>;
+  } = {},
+) {
   const saved: ClientSettings[] = [];
   const recording: boolean[] = [];
-  let status: MusicGlobalShortcutStatus = { playPause: "unavailable" };
+  let status: MusicGlobalShortcutStatus = options.status ?? { playPause: "unavailable" };
+  let keysReleased = false;
   __resetClientSettingsPersistenceForTests();
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,
@@ -62,9 +70,18 @@ function setup() {
       status = {};
     },
     musicGlobalShortcuts: {
-      getStatus: async () => status,
+      // Like the shell: no keys are held while a recorder is open.
+      getStatus: async () => (keysReleased ? {} : status),
       setRecording: async (value: boolean) => {
         recording.push(value);
+        if (value) {
+          keysReleased = true;
+          return {};
+        }
+        await options.release;
+        keysReleased = false;
+        if (options.afterRelease !== undefined) status = options.afterRelease;
+        return status;
       },
       onAction: () => () => undefined,
     },
@@ -82,6 +99,29 @@ function setup() {
     },
   };
 }
+
+it("shows what the shell holds only after it has taken the keys back", async () => {
+  using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  let releaseKeys = () => {};
+  const release = new Promise<void>((resolve) => {
+    releaseKeys = resolve;
+  });
+  using shell = setup({
+    status: {},
+    afterRelease: { playPause: "registered", next: "unavailable" },
+    release,
+  });
+  await using screen = await render(<MusicGlobalShortcutSettings />, {
+    router: false /* no route context */,
+  });
+
+  await screen.getByRole("button", { name: "Record shortcut for Next" }).click();
+  await userEvent.keyboard("{Control>}{Alt>}n{/Alt}{/Control}");
+  await vi.waitFor(() => expect(shell.saved).toHaveLength(1));
+  // The save lands while the keys are still let go; the shell then fails to take Next.
+  releaseKeys();
+  await expect.element(screen.getByText("Used by another app")).toBeVisible();
+});
 
 it("refuses clashing keys beside their binding and saves, warns and clears the rest", async () => {
   using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");

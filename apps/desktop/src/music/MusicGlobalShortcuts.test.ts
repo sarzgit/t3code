@@ -23,6 +23,7 @@ vi.mock("electron", () => ({
 }));
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopShortcutRecording from "../app/DesktopShortcutRecording.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MUSIC_GLOBAL_SHORTCUT_ACTION_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -98,6 +99,7 @@ const setup = (
           Layer.mock(DesktopClientSettings.DesktopClientSettings, { get: Effect.succeedNone }),
         ),
       ),
+      Layer.provideMerge(DesktopShortcutRecording.layer),
     );
     return { main, mini, miniCalls, layer };
   });
@@ -159,27 +161,36 @@ it.effect("registers only valid bindings and frees only its own keys on every wa
       assert.lengthOf(unregisterMock.mock.calls, 2);
 
       yield* shortcuts.configure(withShortcuts(changed));
-      // Recording a key in Settings lets go of T3's keys only, and takes them back after.
-      unregisterMock.mockClear();
-      registerMock.mockClear();
-      yield* shortcuts.setRecording(true);
-      assert.sameMembers(
-        unregisterMock.mock.calls.map(([accelerator]) => accelerator),
-        ["CommandOrControl+Alt+P", "Control+Alt+J"],
-      );
-      assert.deepEqual(yield* shortcuts.status, {});
-      // A save while recording keeps them free.
-      yield* shortcuts.configure(withShortcuts(changed));
-      assert.lengthOf(registerMock.mock.calls, 0);
-      yield* shortcuts.setRecording(false);
-      assert.sameMembers(registered(), ["CommandOrControl+Alt+P", "Control+Alt+J"]);
+      // Either Settings recorder lets go of T3's keys only, and the last one to end takes them back.
+      const recordings = yield* DesktopShortcutRecording.DesktopShortcutRecording;
+      const ours = ["CommandOrControl+Alt+P", "Control+Alt+J"];
+      for (const [first, second] of [
+        ["music", "snapShot"],
+        ["snapShot", "music"],
+      ] as const) {
+        unregisterMock.mockClear();
+        registerMock.mockClear();
+        yield* recordings.set(first, true);
+        assert.sameMembers(
+          unregisterMock.mock.calls.map(([accelerator]) => accelerator),
+          ours,
+        );
+        assert.deepEqual(yield* shortcuts.status, {});
+        yield* recordings.set(second, true);
+        // A save while recording keeps them free.
+        yield* shortcuts.configure(withShortcuts(changed));
+        yield* recordings.set(first, false);
+        assert.lengthOf(registerMock.mock.calls, 0, `${first} ended while ${second} records`);
+        yield* recordings.set(second, false);
+        assert.sameMembers(registered(), ours);
+      }
       // A recorder that never says it stopped gives the keys back after a minute.
       registerMock.mockClear();
-      yield* shortcuts.setRecording(true);
+      yield* recordings.set("snapShot", true);
       yield* TestClock.adjust("59 seconds");
       assert.lengthOf(registerMock.mock.calls, 0);
       yield* TestClock.adjust("1 second");
-      assert.sameMembers(registered(), ["CommandOrControl+Alt+P", "Control+Alt+J"]);
+      assert.sameMembers(registered(), ours);
       unregisterMock.mockClear();
     }).pipe(Effect.provide(layer));
     // Quitting closes the layer's scope, which frees what is still held.

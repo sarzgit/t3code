@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import * as MiniPlayerWindow from "../../music/MiniPlayerWindow.ts";
+import * as DesktopShortcutRecording from "../../app/DesktopShortcutRecording.ts";
 import * as MusicGlobalShortcuts from "../../music/MusicGlobalShortcuts.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
@@ -55,12 +56,14 @@ export const openMainFromMusicMiniPlayer = DesktopIpc.makeIpcMethod({
 
 // Main window only: the Music settings block shows which keys failed to register.
 // Main window only: Settings is where keys are recorded.
+// Answers with the keys held once recording has started or ended, so Settings never reads early.
 export const setMusicGlobalShortcutsRecording = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.MUSIC_GLOBAL_SHORTCUTS_SET_RECORDING_CHANNEL,
   payload: Schema.Boolean,
-  result: Schema.Void,
+  result: MusicGlobalShortcutStatus,
   handler: Effect.fn("desktop.ipc.musicGlobalShortcuts.setRecording")(function* (recording) {
-    yield* (yield* MusicGlobalShortcuts.MusicGlobalShortcuts).setRecording(recording);
+    yield* (yield* DesktopShortcutRecording.DesktopShortcutRecording).set("music", recording);
+    return yield* (yield* MusicGlobalShortcuts.MusicGlobalShortcuts).status;
   }),
 });
 
