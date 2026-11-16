@@ -1842,6 +1842,65 @@ describe("MusicPlayer queue", () => {
     }),
   );
 
+  it.effect("resumes an unedited queue's song where its playlist moved it, never another", () =>
+    Effect.gen(function* () {
+      for (const change of ["moved", "missing"] as const) {
+        const songs = queueSongs(4);
+        const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+        const first = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+        const files = yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const store = yield* MusicQueueStore.MusicQueueStore;
+          const statuses = yield* subscribeQueue(player);
+          const { received } = yield* subscribe(player);
+          const session = yield* Queue.take(first.sessions);
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 });
+          yield* until(statuses, (status) => status.active !== null);
+          session.emit(playingSample(songs[1]!.id, { position: 60 }));
+          yield* Queue.take(received);
+          session.emit(playingSample(songs[1]!.id, { position: 61, state: "paused" }));
+          yield* until(received, (state) => state._tag === "ready" && state.playback === "paused");
+          yield* store.settled;
+          return yield* store.load;
+        }).pipe(providePlayer(first.runner), Effect.scoped);
+        assert.strictEqual(files.body?.formula?.playlistId, PLAYLIST_ID);
+
+        const saved = songs[1]!.id;
+        if (change === "moved") {
+          songs[1]!.id = songs[3]!.id;
+          songs[3]!.id = saved;
+        } else {
+          songs[1]!.id = "FFFF000000000001";
+        }
+        const second = yield* makeHarness({ respond: (args) => runFakeScript(args, fake.music) });
+        yield* Effect.gen(function* () {
+          const player = yield* MusicPlayer.MusicPlayer;
+          const statuses = yield* subscribeQueue(player);
+          const card = (yield* Queue.take(statuses)).saved!;
+          const resume = player.resumeQueue({ queueId: card.id, revision: card.revision });
+          if (change === "moved") {
+            yield* resume;
+            assert.strictEqual(fake.played.at(-1), `${saved}#3`);
+            assert.deepStrictEqual((yield* Ref.get(second.calls)).at(-1)!.slice(5), ["seek", "61"]);
+            const active = (yield* until(statuses, (status) => status.active !== null)).active!;
+            assert.strictEqual(active.currentKey, "s3");
+          } else {
+            assert.strictEqual((yield* Effect.flip(resume)).reason, "not-found");
+            assert.isFalse(fake.played.some((label) => label.startsWith("FFFF")));
+            const missing = (yield* until(
+              statuses,
+              (status) => status.saved?.sourceMissing === true,
+            )).saved!;
+            assert.strictEqual(missing.id, card.id);
+          }
+        }).pipe(
+          providePlayer(second.runner, "darwin", undefined, MusicQueueStore.layerMemory(files)),
+          Effect.scoped,
+        );
+      }
+    }),
+  );
+
   it.effect("takes a restored queue back only when Music still holds its song where it was", () =>
     Effect.gen(function* () {
       const { songs, fake, files } = yield* savedEditedQueue();
