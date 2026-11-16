@@ -110,6 +110,11 @@ export const make = Effect.gen(function* () {
   // Must not yield: the bridge registers a scheme Electron rejects once ready.
   const userDataPath = yield* DesktopUserData.resolveUserDataPath(environment);
   yield* electronApp.setPath("userData", userDataPath);
+  // A packaged task profile is a throwaway copy beside the user's real app with the same name;
+  // its Chromium encryption must not read, prompt for or create the real app's Keychain item.
+  if (environment.isPackaged && Option.isSome(environment.userDataDirectoryOverride)) {
+    yield* electronApp.appendCommandLineSwitch("use-mock-keychain");
+  }
 
   // Clerk skips the profile lock on macOS. Interrupt before runtime construction because quit is asynchronous.
   if (!(yield* electronApp.requestSingleInstanceLock)) {

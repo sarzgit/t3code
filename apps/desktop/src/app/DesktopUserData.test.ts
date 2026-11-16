@@ -27,6 +27,8 @@ it.effect.each(["t3code", "T3 Code (Alpha)"])(
         isDevelopment: false,
         platform: "win32",
         userDataDirectoryOverride: Option.none(),
+        homeDirectory: "/Users/alice",
+        baseDir: "/Users/alice/.t3",
       });
       assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
       assert.equal(yield* fs.readFileString(path.join(source, "Local State")), state);
@@ -37,6 +39,8 @@ it.effect.each(["t3code", "T3 Code (Alpha)"])(
         isDevelopment: false,
         platform: "win32",
         userDataDirectoryOverride: Option.none(),
+        homeDirectory: "/Users/alice",
+        baseDir: "/Users/alice/.t3",
       });
       assert.equal(
         yield* fs.readFileString(path.join(destination, "Local State")),

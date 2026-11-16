@@ -66,11 +66,15 @@ const layerDesktopClerk = (
   },
   listeners = new Map<string, (...args: unknown[]) => void>(),
   userDataDirectoryOverride: Option.Option<string> = Option.none(),
+  baseDir = "/tmp/home/.t3",
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: clerkStateDir,
     isDevelopment,
+    isPackaged: !isDevelopment,
     appDataDirectory: "/tmp/app-data",
+    homeDirectory: "/tmp/home",
+    baseDir,
     platform,
     userDataDirectoryOverride,
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
@@ -79,6 +83,10 @@ const layerDesktopClerk = (
     setPath: (name: string, value: string) =>
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
+      }),
+    appendCommandLineSwitch: (name: string) =>
+      Effect.sync(() => {
+        events.push(`appendSwitch:${name}`);
       }),
     requestSingleInstanceLock: Effect.sync(() => {
       events.push("requestSingleInstanceLock");
@@ -152,9 +160,19 @@ describe("DesktopClerk", () => {
       userData: "/task/chromium-user-data",
       userDataDirectoryOverride: Option.some("/task/chromium-user-data"),
     },
+    {
+      // Beside the user's real app of the same name: no shared Keychain item, before the lock.
+      name: "a packaged task profile",
+      isDevelopment: false,
+      platform: "darwin" as const,
+      userData: "/task/chromium-user-data",
+      userDataDirectoryOverride: Option.some("/task/chromium-user-data"),
+      baseDir: "/task/t3-home",
+      switches: ["appendSwitch:use-mock-keychain"],
+    },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",
-    ({ isDevelopment, platform, userData, userDataDirectoryOverride }) => {
+    ({ isDevelopment, platform, userData, userDataDirectoryOverride, baseDir, switches }) => {
       const events: string[] = [];
       storageMock.mockReturnValue(storageAdapter);
       createClerkBridgeMock.mockImplementation(() => {
@@ -173,6 +191,7 @@ describe("DesktopClerk", () => {
               undefined,
               undefined,
               userDataDirectoryOverride,
+              baseDir,
             ),
           ),
         ),
@@ -180,6 +199,7 @@ describe("DesktopClerk", () => {
 
       assert.deepEqual(events, [
         `setPath:userData:${userData}`,
+        ...(switches ?? []),
         "requestSingleInstanceLock",
         "on:second-instance",
         "on:open-url",

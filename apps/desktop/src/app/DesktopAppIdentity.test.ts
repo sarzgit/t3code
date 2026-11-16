@@ -206,7 +206,27 @@ describe("DesktopAppIdentity", () => {
         T3CODE_DESKTOP_USER_DATA_DIR: "chromium-user-data",
       },
     },
-    { name: "a packaged build", env: { T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data" } },
+    {
+      name: "a packaged build without its own T3 home",
+      env: { T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data" },
+    },
+    {
+      name: "a packaged build on the default T3 home",
+      env: {
+        T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
+        T3CODE_HOME: "/Users/alice/.t3",
+      },
+    },
+    ...[
+      "/Users/alice/Library/Application Support/t3code-v2",
+      "/Users/alice/Library/Application Support/task",
+      "/Users/alice/.t3/chromium",
+      "/task/t3-home/chromium",
+      "/task",
+    ].map((profile) => ({
+      name: `a packaged build sharing a location (${profile})`,
+      env: { T3CODE_DESKTOP_USER_DATA_DIR: profile, T3CODE_HOME: "/task/t3-home" },
+    })),
   ])("refuses a profile override for $name instead of using the shared profile", ({ env }) =>
     withIdentity(
       Effect.gen(function* () {
@@ -215,6 +235,28 @@ describe("DesktopAppIdentity", () => {
         assert.equal(error.operation, "validate-override");
       }),
       { environment: { env } },
+    ),
+  );
+
+  it.effect("selects a packaged task profile paired with its own T3 home, probing nothing", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        assert.equal(yield* identity.resolveUserDataPath, "/task/chromium-user-data");
+      }),
+      {
+        legacyPathProbeError: PlatformError.badArgument({
+          module: "FileSystem",
+          method: "exists",
+          description: "the shared profile must not be probed",
+        }),
+        environment: {
+          env: {
+            T3CODE_DESKTOP_USER_DATA_DIR: "/task/chromium-user-data",
+            T3CODE_HOME: "/task/t3-home",
+          },
+        },
+      },
     ),
   );
 

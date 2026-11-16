@@ -38,23 +38,64 @@ export class DesktopUserDataInitializationError extends Schema.TaggedError<Deskt
   }
 }
 
+/** A path equal to or inside `parent`. */
+const isWithin = (path: Path.Path, parent: string, child: string) => {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+};
+
+/**
+ * Which override problem refuses it, if any. A packaged build takes one only as a fully separate
+ * task profile: absolute, outside the shared profiles' folder and the default T3 home, and paired
+ * with its own explicit T3 home, so lock, Chromium state and T3 state all stay apart.
+ */
+const overrideProblem = (
+  path: Path.Path,
+  override: string,
+  input: {
+    readonly appDataDirectory: string;
+    readonly isDevelopment: boolean;
+    readonly homeDirectory: string;
+    readonly baseDir: string;
+  },
+) => {
+  if (!path.isAbsolute(override)) return "NotAbsolute";
+  if (input.isDevelopment) return null;
+  const defaultHome = path.join(input.homeDirectory, ".t3");
+  const home = path.normalize(input.baseDir);
+  if (!path.isAbsolute(home) || isWithin(path, defaultHome, home)) return "PackagedNeedsOwnT3Home";
+  const profile = path.normalize(override);
+  if (
+    isWithin(path, input.appDataDirectory, profile) ||
+    isWithin(path, defaultHome, profile) ||
+    isWithin(path, home, profile) ||
+    isWithin(path, profile, home)
+  ) {
+    return "SharedLocation";
+  }
+  return null;
+};
+
 export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPath")(
   function* (input: {
     readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
     readonly userDataDirectoryOverride: Option.Option<string>;
+    readonly homeDirectory: string;
+    readonly baseDir: string;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     if (Option.isSome(input.userDataDirectoryOverride)) {
       const override = input.userDataDirectoryOverride.value;
-      // Isolates dev runs; never fall back to the shared profile or migrate a legacy one.
-      if (!input.isDevelopment || !path.isAbsolute(override)) {
+      // Never falls back to the shared profile or migrates a legacy one.
+      const problem = overrideProblem(path, override, input);
+      if (problem !== null) {
         return yield* new DesktopUserDataInitializationError({
           operation: "validate-override",
           resourcePath: override,
-          category: input.isDevelopment ? "NotAbsolute" : "PackagedBuild",
+          category: problem,
           cause: undefined,
         });
       }
