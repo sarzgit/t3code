@@ -192,6 +192,9 @@ overrides:
   # react-native-worklets peers on any version, so a fresh resolve takes the newest
   # one; React Native's CLI plugin wants exactly its own. Move with react-native.
   "@react-native/metro-config": 0.88.1
+  # @cloudflare/unenv-preset peers on exactly the unenv rc that alchemy's runtime ships with,
+  # but the runtime's own range lets a fresh resolve take a newer rc. Move with alchemy.
+  "@alchemy.run/cloudflare-runtime>unenv": 2.0.0-rc.24
   # The desktop app installs these without a lockfile when it packages them, so
   # pin the native passkey code that runs in its main process.
   "electron-webauthn>@electron-webauthn/macos": "catalog:"
