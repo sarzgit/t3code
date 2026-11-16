@@ -2074,8 +2074,23 @@ describe("MusicPlayer queue", () => {
     Effect.gen(function* () {
       const songs = queueSongs(4);
       const fake = fakeMusic({ [PLAYLIST_ID]: songs });
+      // Lets a test break Undo midway: fail its next script, or switch Music before its seek.
+      let undoBreaks: "fail" | "switch" | null = null;
       const { calls, sessions, runner } = yield* makeHarness({
-        respond: (args) => runFakeScript(args, fake.music),
+        respond: (args) => {
+          if (undoBreaks === "fail") {
+            undoBreaks = null;
+            return Effect.succeed(
+              output({ code: ChildProcessSpawner.ExitCode(1), stderr: "boom" }),
+            );
+          }
+          if (undoBreaks === "switch" && args.includes("seek-before-end")) {
+            undoBreaks = null;
+            fake.player.current = songs[1]!.id;
+            fake.player.playlist = PLAYLIST_ID;
+          }
+          return runFakeScript(args, fake.music);
+        },
       });
       yield* Effect.gen(function* () {
         const player = yield* MusicPlayer.MusicPlayer;
@@ -2130,6 +2145,38 @@ describe("MusicPlayer queue", () => {
           (yield* Effect.flip(player.dismissSavedQueue(stale))).reason,
           "queue-changed",
         );
+
+        // An Undo that fails partway leaves the queue it would restore saved, and the queue it
+        // replaced no longer steers Next: Music's own Next runs, not T3's order.
+        for (const [round, breaks] of (["switch", "fail"] as const).entries()) {
+          const current = (yield* Queue.take(yield* subscribeQueue(player))).active!;
+          const view = yield* player.getQueue({ queueId: current.id });
+          yield* player.editQueue({
+            queueId: current.id,
+            expectedRevision: current.revision,
+            ...(view.sourceCount === undefined ? {} : { sourceCount: view.sourceCount }),
+            edit: { _tag: "clear-upcoming" },
+          });
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[1]!.id, index: 1 });
+          const hold = (yield* until(statuses, (status) => status.replaced !== null)).replaced!;
+          // Far from the last round's spot, or the stream treats it as ordinary progress.
+          session.emit(playingSample(songs[1]!.id, { position: 20 + round * 60 }));
+          yield* until(
+            received,
+            (state) => state._tag === "ready" && state.track?.id === songs[1]!.id,
+          );
+          undoBreaks = breaks;
+          const error = yield* Effect.flip(player.undoReplace(hold));
+          assert.include(["queue-changed", "unavailable"], error.reason, breaks);
+          const now = yield* Queue.take(yield* subscribeQueue(player));
+          assert.deepStrictEqual([now.active, now.saved?.id], [null, hold.replacedId], breaks);
+          const before = fake.played.length;
+          yield* player.control({ _tag: "next" });
+          assert.deepStrictEqual(fake.played.slice(before), ["music next"], breaks);
+          // Back to a T3 queue for the next round.
+          yield* player.playTrack({ playlistId: PLAYLIST_ID, trackId: songs[2]!.id, index: 2 });
+          yield* until(statuses, (status) => status.active !== null);
+        }
       }).pipe(providePlayer(runner), Effect.scoped);
     }),
   );

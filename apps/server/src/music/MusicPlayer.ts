@@ -2973,6 +2973,8 @@ const make = Effect.fn("MusicPlayer.make")(function* (options: { readonly upNext
     }
     // The held body and position land in one writer turn, never the replacement's position.
     forgetPending();
+    // The replacement stops steering Next now; only a Resume that lands picks again.
+    yield* Ref.set(picked, null);
     yield* commit(hold.held, "body");
     yield* resumeSaved(hold.held);
     return { id: hold.held.id, revision: hold.held.revision } satisfies MusicQueueRef;
