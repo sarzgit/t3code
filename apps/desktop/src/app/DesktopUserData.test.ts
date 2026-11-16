@@ -8,6 +8,7 @@ import * as PlatformError from "effect/PlatformError";
 
 import { desktopIsolatedIdentity } from "@t3tools/shared/desktopIsolatedIdentity";
 
+import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
 import { clearStaleGpuCaches, resolveUserDataPath } from "./DesktopUserData.ts";
 
 it.effect.each(["t3code", "T3 Code (Alpha)"])(
@@ -217,5 +218,55 @@ it.effect(
       // Checking reads metadata only: nothing new was created.
       assert.isFalse(yield* fs.exists(path.join(home, ".t3-isolated-musictest")));
       assert.isFalse(yield* fs.exists(path.join(root, "task", "home")));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "refuses an isolated home or profile that names the installed app's in another case",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-isolated-case-" });
+      const home = path.join(root, "home");
+      const appData = path.join(home, "Library", "Application Support");
+      yield* fs.makeDirectory(path.join(home, ".t3", "userdata"), { recursive: true });
+      yield* fs.makeDirectory(path.join(appData, "t3code-v2"), { recursive: true });
+      const resolve = (baseDir: string, override?: string) =>
+        resolveUserDataPath({
+          appDataDirectory: appData,
+          isDevelopment: false,
+          platform: "darwin",
+          userDataDirectoryOverride: Option.fromNullishOr(override),
+          homeDirectory: home,
+          baseDir,
+          isolatedIdentity: Option.some(desktopIsolatedIdentity("musictest")),
+        }).pipe(
+          // The synchronous filesystem the app uses before Electron is ready.
+          Effect.provide(DesktopPreReadyFileSystem.layer),
+          Effect.map((profile) => ({ profile })),
+          Effect.catchTags({
+            DesktopUserDataInitializationError: (error) =>
+              Effect.succeed({ refused: error.category }),
+          }),
+        );
+      // macOS volumes usually ignore case, so these name the installed app's own folders.
+      assert.deepStrictEqual(
+        [
+          yield* resolve(path.join(home, ".T3")),
+          yield* resolve(path.join(home, ".T3", "USERDATA", "new")),
+          yield* resolve(
+            path.join(root, "task", "home"),
+            path.join(appData, "T3CODE-V2", "Profile"),
+          ),
+          yield* resolve(path.join(root, "task", "home"), path.join(root, "TASK", "HOME", "p")),
+        ],
+        [
+          { refused: "SharedT3Home" },
+          { refused: "SharedT3Home" },
+          { refused: "SharedLocation" },
+          { refused: "SharedLocation" },
+        ],
+      );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -97,12 +97,18 @@ const isolatedProblem = Effect.fnUntraced(function* (
     readonly appDataDirectory: string;
     readonly homeDirectory: string;
     readonly baseDir: string;
+    readonly platform: NodeJS.Platform;
   },
   profile: string,
   chosen: boolean,
 ) {
   if (!path.isAbsolute(input.baseDir)) return "PackagedNeedsOwnT3Home";
-  const real = (target: string) => canonical(fs, path, target);
+  // macOS and Windows volumes usually ignore case, also for folders that don't exist yet.
+  const fold = input.platform === "darwin" || input.platform === "win32";
+  const real = (target: string) =>
+    canonical(fs, path, target).pipe(
+      Effect.map((resolved) => (fold ? resolved.toLowerCase() : resolved)),
+    );
   const shared: Array<string> = [yield* real(path.join(input.homeDirectory, ".t3"))];
   for (const name of SHARED_PROFILE_NAMES) {
     shared.push(yield* real(path.join(input.appDataDirectory, name)));

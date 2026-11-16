@@ -45,7 +45,8 @@ export const make = FileSystem.makeNoop({
       ),
     ),
   readFileString: (path) => syncFs("readFileString", path, () => NodeFS.readFileSync(path, "utf8")),
-  realPath: (path) => syncFs("realPath", path, () => NodeFS.realpathSync(path)),
+  // The native form reports names as stored; the JS form echoes the case it was given.
+  realPath: (path) => syncFs("realPath", path, () => NodeFS.realpathSync.native(path)),
   makeDirectory: (path, options) =>
     syncFs("makeDirectory", path, () => {
       NodeFS.mkdirSync(path, { recursive: options?.recursive ?? false });
