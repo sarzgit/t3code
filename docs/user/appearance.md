@@ -79,6 +79,10 @@ The **Stats** tab shows how long you listened today, this week or this month, yo
 songs, and how much of it was while an agent worked in each project. Listening counts only while T3
 Code is open.
 
+Use a project's Stats menu to hide its breakdown. Restore it under **Settings → Appearance →
+Hidden Music projects**. Hidden projects stay hidden after restarting T3 Code; listening totals
+and history are kept.
+
 Only playlists in your Music library appear; add an Apple Music playlist to your library to play it
 here. Pin a playlist to keep it at the top of the list, or remove one you never play from T3 Code's
 list; **Hidden** at the bottom brings it back. These choices are saved on the Mac, so every device

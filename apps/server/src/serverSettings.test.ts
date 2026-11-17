@@ -424,6 +424,41 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect(
+    "keeps individual music stats projects hidden after rebuilding the settings service",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const first = ProjectId.make("music-project-one");
+        const second = ProjectId.make("music-project-two");
+        const reload = Effect.gen(function* () {
+          const fresh = yield* ServerSettingsModule.ServerSettingsService;
+          return yield* fresh.getSettings;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ServerSettingsModule.layer).pipe(
+              Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layerTest())),
+            ),
+          ),
+        );
+
+        assert.deepEqual((yield* service.getSettings).musicStatsHiddenProjects, []);
+        yield* Effect.forEach(
+          [first, second],
+          (projectId) =>
+            service.updateSettings({ setMusicStatsProjectVisibility: { projectId, hidden: true } }),
+          { concurrency: "unbounded" },
+        );
+        const reloaded = yield* reload;
+        assert.sameMembers([...reloaded.musicStatsHiddenProjects], [first, second]);
+        const restored = yield* service.updateSettings({
+          setMusicStatsProjectVisibility: { projectId: first, hidden: false },
+        });
+        assert.deepEqual(restored.musicStatsHiddenProjects, [second]);
+        assert.deepEqual((yield* reload).musicStatsHiddenProjects, [second]);
+      }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("deep merges nested settings updates without dropping siblings", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

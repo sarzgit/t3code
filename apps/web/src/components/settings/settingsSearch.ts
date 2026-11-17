@@ -400,6 +400,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     macOnly: true,
   },
   {
+    id: "music-hidden-projects",
+    title: "Hidden Music projects",
+    to: "/settings/appearance",
+    searchTerms: ["music stats statistics project hide restore unhide listening"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",

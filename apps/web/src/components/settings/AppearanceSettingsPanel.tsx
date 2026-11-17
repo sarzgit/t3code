@@ -39,6 +39,7 @@ import { MusicGlobalShortcutSettings } from "./MusicGlobalShortcutSettings";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 import { TypographySection } from "./TypographySettings";
 import { ThreadDetailsItemsRow } from "./ThreadDetailsItemsRow";
+import { HiddenMusicProjectsSettings } from "./HiddenMusicProjectsSettings";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -423,6 +424,7 @@ export function AppearanceSettingsPanel() {
           }
         />
         <MusicGlobalShortcutSettings />
+        <HiddenMusicProjectsSettings />
         <AdvancedSettings
           targetIds={[
             searchableSetting("panel-animations").id,

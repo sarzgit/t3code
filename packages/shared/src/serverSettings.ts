@@ -396,6 +396,7 @@ export function applyServerSettingsPatch(
     setModelsHidden,
     setProviderModelOrder,
     setMusicPlaylists,
+    setMusicStatsProjectVisibility,
     providerModelPreferences,
     automaticGitFetchInterval,
     providerHealthRefreshInterval,
@@ -511,6 +512,20 @@ export function applyServerSettingsPatch(
     ...(setMusicPlaylists?.length
       ? { musicPlaylists: applyMusicPlaylistChanges(current.musicPlaylists, setMusicPlaylists) }
       : {}),
+    ...(setMusicStatsProjectVisibility === undefined
+      ? {}
+      : {
+          musicStatsHiddenProjects: setMusicStatsProjectVisibility.hidden
+            ? [
+                ...new Set([
+                  ...current.musicStatsHiddenProjects,
+                  setMusicStatsProjectVisibility.projectId,
+                ]),
+              ]
+            : current.musicStatsHiddenProjects.filter(
+                (id) => id !== setMusicStatsProjectVisibility.projectId,
+              ),
+        }),
     ...(worktreeCleanupPatch === undefined
       ? {}
       : {

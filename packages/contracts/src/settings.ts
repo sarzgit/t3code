@@ -1501,6 +1501,9 @@ export const ServerSettings = Schema.Struct({
   musicPlaylists: MusicPlaylistPreferences.pipe(
     Schema.withDecodingDefault(Effect.succeed({ pinned: [], hidden: [] })),
   ),
+  musicStatsHiddenProjects: Schema.Array(ProjectId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   /** Beta: guest links for this machine's threads. Off refuses new links and pauses existing ones. */
   guestSharingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
@@ -1830,6 +1833,9 @@ export const ServerSettingsPatch = Schema.Struct({
   // Applied in order under the settings write lock, so clients never overwrite each other.
   setMusicPlaylists: Schema.optionalKey(
     Schema.Array(MusicPlaylistChange).check(Schema.isMaxLength(100)),
+  ),
+  setMusicStatsProjectVisibility: Schema.optionalKey(
+    Schema.Struct({ projectId: ProjectId, hidden: Schema.Boolean }),
   ),
   favorites: Schema.optionalKey(ModelFavorites),
   providerModelPreferences: Schema.optionalKey(ProviderModelPreferences),

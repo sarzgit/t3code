@@ -11,6 +11,7 @@ import { useRef, useState } from "react";
 
 import { useProject } from "~/state/entities";
 import { musicEnvironment } from "~/state/music";
+import { serverEnvironment } from "~/state/server";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
@@ -27,6 +28,7 @@ import {
 import { ScrollArea } from "../ui/scroll-area";
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { toastManager } from "../ui/toast";
 
 const STATS_RANGES: ReadonlyArray<{ days: MusicStatsInput["days"]; label: string }> = [
   { days: 1, label: "Today" },
@@ -54,6 +56,7 @@ export function ListeningStats({ environmentId }: { environmentId: EnvironmentId
   const query = useEnvironmentQuery(musicEnvironment.stats({ environmentId, input: { days } }));
   const [importStatus, setImportStatus] = useState<ImportStatus>({ _tag: "idle" });
   const stats = query.data;
+  const totalRef = useRef<HTMLParagraphElement>(null);
   return (
     <div className="flex flex-col gap-3">
       <ToggleGroup
@@ -89,9 +92,19 @@ export function ListeningStats({ environmentId }: { environmentId: EnvironmentId
         <>
           <div className="flex items-center justify-between gap-2">
             {stats.totalSec < 60 ? (
-              <p className="text-sm text-muted-foreground">No listening yet</p>
+              <p
+                ref={totalRef}
+                tabIndex={-1}
+                className="text-sm text-muted-foreground outline-none"
+              >
+                No listening yet
+              </p>
             ) : (
-              <p className="text-2xl font-semibold tabular-nums">
+              <p
+                ref={totalRef}
+                tabIndex={-1}
+                className="text-2xl font-semibold tabular-nums outline-none"
+              >
                 {formatMusicDuration(stats.totalSec)}
               </p>
             )}
@@ -113,7 +126,11 @@ export function ListeningStats({ environmentId }: { environmentId: EnvironmentId
               {importStatus.message}
             </p>
           ) : null}
-          <ProjectStats environmentId={environmentId} stats={stats} />
+          <ProjectStats
+            environmentId={environmentId}
+            stats={stats}
+            onHidden={() => totalRef.current?.focus()}
+          />
         </>
       )}
     </div>
@@ -251,22 +268,31 @@ function HistoryMenu(props: {
 function ProjectStats({
   environmentId,
   stats,
+  onHidden,
 }: {
   environmentId: EnvironmentId;
   stats: MusicStats;
+  onHidden: () => void;
 }) {
-  if (stats.projects.length === 0) return null;
+  const settings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
+  // Never show project rows before their saved visibility preferences arrive.
+  if (settings === null) return null;
+  const projects = stats.projects.filter(
+    (project) => !settings.musicStatsHiddenProjects.includes(project.projectId),
+  );
+  if (projects.length === 0) return null;
   return (
     <ScrollArea className="max-h-60" scrollFade>
       <section className="flex flex-col gap-1">
         <h3 className="text-xs font-medium text-muted-foreground">While agents worked</h3>
         <ul className="flex flex-col">
-          {stats.projects.map((project) => (
+          {projects.map((project) => (
             <ProjectStatRow
               key={project.projectId}
               environmentId={environmentId}
               projectId={project.projectId}
               seconds={project.seconds}
+              onHidden={onHidden}
             />
           ))}
         </ul>
@@ -279,14 +305,58 @@ function ProjectStatRow(props: {
   environmentId: EnvironmentId;
   projectId: ProjectId;
   seconds: number;
+  onHidden: () => void;
 }) {
   const project = useProject(scopeProjectRef(props.environmentId, props.projectId));
+  const canHide = useAtomValue(
+    serverEnvironment.updateSettings.permissionAtom(props.environmentId),
+  );
+  const saveSettings = useAtomCommand(serverEnvironment.updateSettings);
+  const [saving, setSaving] = useState(false);
+  const title = project?.title ?? "Removed project";
   return (
     <li className="flex items-center gap-2 py-0.5 text-sm">
-      <span className="min-w-0 flex-1 truncate">{project?.title ?? "Removed project"}</span>
+      <span className="min-w-0 flex-1 truncate">{title}</span>
       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
         {formatMusicDuration(props.seconds)}
       </span>
+      {canHide ? (
+        <Menu>
+          <MenuTrigger
+            render={<Button variant="ghost-muted" size="icon-xs" />}
+            aria-label={`Stats for ${title}`}
+            disabled={saving}
+          >
+            <EllipsisIcon />
+          </MenuTrigger>
+          <MenuPopup align="end">
+            <MenuItem
+              onClick={() => {
+                setSaving(true);
+                void saveSettings({
+                  environmentId: props.environmentId,
+                  input: {
+                    patch: {
+                      setMusicStatsProjectVisibility: { projectId: props.projectId, hidden: true },
+                    },
+                  },
+                }).then((result) => {
+                  setSaving(false);
+                  if (result._tag === "Success") props.onHidden();
+                  else
+                    toastManager.add({
+                      type: "error",
+                      title: "Project not hidden",
+                      description: "Try again.",
+                    });
+                });
+              }}
+            >
+              Hide project
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
+      ) : null}
     </li>
   );
 }
